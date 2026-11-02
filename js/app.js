@@ -29,8 +29,9 @@
     progress: {},
     custom: [],
     best: {},
-    stats: { answered: 0, correct: 0, bestCombo: 0, games: 0, perfect: 0, fastMatch: false },
+    stats: { answered: 0, correct: 0, bestCombo: 0, games: 0, perfect: 0, fastMatch: false, bestBlitz: 0, bestRainLevel: 0 },
     achievements: [],
+    seenModes: [],
   });
 
   function load() {
@@ -145,7 +146,7 @@
   if (canSpeak) { try { speechSynthesis.getVoices(); } catch (e) { /* ignore */ } }
 
   /* ======================= 词库 & 进度 ======================= */
-  const toWord = (a) => ({ w: a[0], ph: a[1] || '', pos: a[2] || '', cn: a[3] || '', ex: a[4] || '' });
+  const toWord = (a) => ({ w: a[0], ph: a[1] || '', pos: a[2] || '', cn: a[3] || '', ex: a[4] || '', exCn: a[5] || '' });
 
   function allBooks() {
     const books = window.WORD_BOOKS.map((b) => ({ ...b, words: b.words.map(toWord) }));
@@ -182,9 +183,9 @@
   }
 
   // 智能选词：到期复习 > 新词 > 未到期的低等级词
-  function pickWords(book, n) {
+  function pickWords(book, n, pool = book.words) {
     const now = Date.now();
-    const scored = book.words.map((w) => {
+    const scored = pool.map((w) => {
       const p = prog(book, w);
       let s;
       if (!p) s = 1 + Math.random();
@@ -195,6 +196,75 @@
     scored.sort((a, b) => b.s - a.s);
     return shuffle(scored.slice(0, n).map((x) => x.w));
   }
+
+  // 无尽模式的出词器：先出最需要复习的词，之后整本循环打乱
+  function wordStream(book, pool = book.words) {
+    let queue = [];
+    let first = true;
+    let last = null;
+    return () => {
+      if (!queue.length) {
+        queue = first ? pickWords(book, Math.min(15, pool.length), pool) : shuffle(pool);
+        first = false;
+        if (queue.length > 1 && queue[0] === last) queue.push(queue.shift());
+      }
+      last = queue.shift();
+      return last;
+    };
+  }
+
+  // 把释义拆成义项，用来避开意思重叠的干扰项（如 crucial / vital）
+  const senses = (cn) => cn.replace(/（[^）]*）|\([^)]*\)/g, '').split(/[；;，,、]/).map((x) => x.trim()).filter(Boolean);
+  function meaningOverlap(a, b) {
+    const A = senses(a.cn), B = senses(b.cn);
+    return A.some((x) => B.some((y) => x.includes(y) || y.includes(x)));
+  }
+
+  // 生成四选一题目。dir: en2cn 英译中 / cn2en 中译英 / listen 听音 / cloze 例句填空
+  function buildQuestion(book, w, dir) {
+    const label = (x) => (dir === 'en2cn' ? x.cn : normalize(x.w));
+    const others = shuffle(book.words.filter((x) => x.w !== w.w));
+    const tiers = [
+      others.filter((x) => !meaningOverlap(x, w) && (dir !== 'cloze' || x.pos === w.pos)),
+      others.filter((x) => !meaningOverlap(x, w)),
+      others,
+    ];
+    const seen = new Set([label(w)]);
+    const distract = [];
+    for (const tier of tiers) {
+      for (const x of tier) {
+        if (distract.length >= 3) break;
+        if (seen.has(label(x))) continue;
+        seen.add(label(x));
+        distract.push(x);
+      }
+    }
+    return { w, dir, options: shuffle([w, ...distract]) };
+  }
+
+  // 在例句中找到目标词，允许常见词形变化：-s/-es/-d/-ed/-ing、双写辅音、e 结尾 +ing、y→i
+  function isFormOf(t, w) {
+    if (t === w) return true;
+    if (t.startsWith(w)) {
+      const rest = t.slice(w.length);
+      if (['s', 'es', 'd', 'ed', 'ing'].includes(rest)) return true;
+      if (rest[0] === w[w.length - 1] && ['ed', 'ing'].includes(rest.slice(1))) return true;
+    }
+    if (w.endsWith('e') && t === w.slice(0, -1) + 'ing') return true;
+    if (w.endsWith('y') && ['ies', 'ied'].some((x) => t === w.slice(0, -1) + x)) return true;
+    return false;
+  }
+  function findInSentence(w) {
+    const word = w.w.toLowerCase();
+    if (!w.ex || !/^[a-z]+$/.test(word)) return null;
+    const re = /[A-Za-z]+/g;
+    let m;
+    while ((m = re.exec(w.ex))) {
+      if (isFormOf(m[0].toLowerCase(), word)) return { start: m.index, end: m.index + m[0].length, form: m[0] };
+    }
+    return null;
+  }
+  const clozePool = (book) => book.words.filter((w) => w.exCn && findInSentence(w));
 
   function touchDay() {
     const today = dayStr();
@@ -255,6 +325,8 @@
     { id: 'combo10', icon: '🔥', name: '连击达人', desc: '单局连对 10 题', test: () => state.stats.bestCombo >= 10 },
     { id: 'perfect', icon: '💯', name: '满分通关', desc: '一局全部答对', test: () => state.stats.perfect >= 1 },
     { id: 'fast', icon: '⚡', name: '闪电手', desc: '20 秒内完成连连看', test: () => state.stats.fastMatch },
+    { id: 'blitz20', icon: '⏱️', name: '争分夺秒', desc: '60 秒挑战答对 20 题', test: () => state.stats.bestBlitz >= 20 },
+    { id: 'rain3', icon: '🌧️', name: '雨中英雄', desc: '单词雨坚持到第 3 波', test: () => state.stats.bestRainLevel >= 3 },
     { id: 'm10', icon: '🌟', name: '小有所成', desc: '掌握 10 个单词', test: () => masteredTotal() >= 10 },
     { id: 'm50', icon: '👑', name: '词汇达人', desc: '掌握 50 个单词', test: () => masteredTotal() >= 50 },
     { id: 's3', icon: '📅', name: '三天打卡', desc: '连续学习 3 天', test: () => state.streak >= 3 },
@@ -331,13 +403,45 @@
 
   /* ======================= 首页 ======================= */
   const MODES = [
-    { id: 'flash', icon: '🃏', name: '闪卡记忆', desc: '翻卡片，认识新单词', color: '#ffd978' },
-    { id: 'quiz', icon: '⚡', name: '极速选择', desc: '限时作答，连击加分', color: '#b9a8ff' },
-    { id: 'spell', icon: '⌨️', name: '拼写大师', desc: '看释义，拼出单词', color: '#8fe0b8' },
-    { id: 'listen', icon: '🎧', name: '听音辨词', desc: '听发音，选出单词', color: '#9fd0ff' },
-    { id: 'match', icon: '🧩', name: '连连看', desc: '英汉配对，挑战最快', color: '#ffb3c6' },
-    { id: 'review', icon: '📕', name: '错题复习', desc: '攻克易错单词', color: '#ffbf9e' },
+    { id: 'flash', group: 'learn', icon: '🃏', name: '闪卡记忆', desc: '翻卡片，认识新单词', color: '#ffd978' },
+    { id: 'review', group: 'learn', icon: '📕', name: '错题复习', desc: '攻克易错单词', color: '#ffbf9e' },
+    { id: 'quiz', group: 'practice', icon: '⚡', name: '极速选择', desc: '限时作答，连击加分', color: '#b9a8ff' },
+    { id: 'listen', group: 'practice', icon: '🎧', name: '听音辨词', desc: '听发音，选出单词', color: '#9fd0ff' },
+    { id: 'spell', group: 'practice', icon: '⌨️', name: '拼写大师', desc: '看释义，拼出单词', color: '#8fe0b8' },
+    { id: 'cloze', group: 'practice', icon: '📝', name: '例句填空', desc: '读懂句子，选词填空', color: '#d6e88f', isNew: true },
+    { id: 'scramble', group: 'practice', icon: '🔤', name: '字母拼拼', desc: '点字母，拼出单词', color: '#a7e3e6', isNew: true },
+    { id: 'match', group: 'practice', icon: '🧩', name: '连连看', desc: '英汉配对，挑战最快', color: '#ffb3c6' },
+    { id: 'blitz', group: 'challenge', icon: '⏱️', name: '60 秒挑战', desc: '一分钟内答对越多越好', color: '#ff9f9f', isNew: true },
+    { id: 'rain', group: 'challenge', icon: '🌧️', name: '单词雨', desc: '打字消灭落下的单词', color: '#c3d0e0', isNew: true },
   ];
+  const MODE_GROUPS = [
+    { id: 'learn', title: '📖 学习' },
+    { id: 'practice', title: '✍️ 练习' },
+    { id: 'challenge', title: '🏆 挑战' },
+  ];
+
+  function modeBest(id, book) {
+    const b = state.best[id + ':' + book.id];
+    if (b == null) return '';
+    if (id === 'match') return `最快 ${b.toFixed(1)} 秒`;
+    if (id === 'blitz') return `最佳 ${b} 题`;
+    if (id === 'rain') return `最高 ${b} 分`;
+    return '';
+  }
+
+  function modeCard(m, book, wrongCount) {
+    const best = modeBest(m.id, book);
+    let badge = '';
+    if (m.id === 'review' && wrongCount) badge = `<span class="badge">${wrongCount}</span>`;
+    else if (m.isNew && !state.seenModes.includes(m.id)) badge = '<span class="badge new">新</span>';
+    return `<button class="mode" data-action="mode" data-id="${m.id}">
+      <div class="mode-icon" style="background:color-mix(in srgb, ${m.color} 75%, var(--surface))">${m.icon}</div>
+      <div class="mode-name">${m.name}</div>
+      <div class="mode-desc">${m.desc}</div>
+      ${best ? `<div class="mode-best">🏅 ${best}</div>` : ''}
+      ${badge}
+    </button>`;
+  }
 
   function renderHome() {
     touchDayView();
@@ -375,18 +479,13 @@
         <p class="muted small">当前词库：已学 ${bs.learned} 词，待复习 ${bs.due} 词，已掌握 ${bs.mastered} 词</p>
       </section>
 
-      <section class="section">
-        <h2 class="section-title">🎮 开始游戏</h2>
-        <div class="modes">
-          ${MODES.map((m) => `
-            <button class="mode" data-action="mode" data-id="${m.id}">
-              <div class="mode-icon" style="background:color-mix(in srgb, ${m.color} 75%, var(--surface))">${m.icon}</div>
-              <div class="mode-name">${m.name}</div>
-              <div class="mode-desc">${m.desc}</div>
-              ${m.id === 'review' && wrongCount ? `<span class="badge">${wrongCount}</span>` : ''}
-            </button>`).join('')}
-        </div>
-      </section>
+      ${MODE_GROUPS.map((grp) => {
+        const ms = MODES.filter((m) => m.group === grp.id);
+        return `<section class="section">
+          <h2 class="section-title">${grp.title}</h2>
+          <div class="modes ${ms.length === 2 ? 'pair' : ''}">${ms.map((m) => modeCard(m, book, wrongCount)).join('')}</div>
+        </section>`;
+      }).join('')}
 
       <section class="section">
         <h2 class="section-title">🧰 更多</h2>
@@ -416,6 +515,7 @@
 
   function startMode(id) {
     const book = currentBook();
+    if (!state.seenModes.includes(id)) { state.seenModes.push(id); save(); }
     if (id === 'flash') go('flash', { words: pickWords(book, 10) });
     else if (id === 'quiz') go('choice', { kind: 'quiz', title: '极速选择', words: pickWords(book, 10), timer: true, hearts: true });
     else if (id === 'listen') {
@@ -429,6 +529,18 @@
       if (!ws.length) { toast('暂无错题，继续保持！👍'); return; }
       go('choice', { kind: 'review', title: '错题复习', words: shuffle(ws), timer: false, hearts: false });
     }
+    else if (id === 'cloze') {
+      const pool = clozePool(book);
+      if (pool.length < 4) { toast('这个词库没有可用的例句，换个内置词库试试', 2600); return; }
+      go('choice', { kind: 'cloze', title: '例句填空', words: pickWords(book, Math.min(10, pool.length), pool), timer: false, hearts: false });
+    }
+    else if (id === 'scramble') {
+      const pool = book.words.filter((w) => w.w.replace(/[^A-Za-z]/g, '').length >= 2);
+      if (!pool.length) { toast('这个词库没有合适的单词'); return; }
+      go('scramble', { words: pickWords(book, Math.min(8, pool.length), pool) });
+    }
+    else if (id === 'blitz') go('blitz');
+    else if (id === 'rain') go('rain');
   }
 
   /* ======================= 通用组件 ======================= */
@@ -440,11 +552,13 @@
       ${extra}
     </div>`;
   }
+  // 字母格子随单词长度缩放，长单词在手机上也排成一行
+  const slotsAttrs = (n) => `class="slots ${n > 11 ? 'compact tiny' : n > 8 ? 'compact' : ''}" style="--n:${n}"`;
   const speakBtn = (w) => `<button class="speak" data-action="speak" data-w="${esc(w)}" aria-label="朗读 ${esc(w)}">🔊</button>`;
-  const wordDetail = (w) => `
+  const wordDetail = (w, showEx = true) => `
     <div><b style="font-family:var(--font-word);font-size:18px">${esc(w.w)}</b> ${w.ph ? `<span class="phonetic">${esc(w.ph)}</span>` : ''} ${speakBtn(w.w)}</div>
     <div><span class="pos">${esc(w.pos)}</span>${esc(w.cn)}</div>
-    ${w.ex ? `<div class="example">${esc(w.ex)}</div>` : ''}`;
+    ${showEx && w.ex ? `<div class="example">${esc(w.ex)}</div>${w.exCn ? `<div class="ex-cn">${esc(w.exCn)}</div>` : ''}` : ''}`;
 
   function quitHandler(e) {
     const el = e.target.closest('[data-action]');
@@ -452,6 +566,53 @@
     if (el.dataset.action === 'quit') { go('home'); return true; }
     if (el.dataset.action === 'speak') { speak(el.dataset.w); return true; }
     return false;
+  }
+
+  function optionsHtml(q) {
+    const cn = q.dir === 'en2cn';
+    return `<div class="options">${q.options.map((o, idx) => `
+      <button class="option ${cn ? '' : 'word'}" data-action="pick" data-idx="${idx}">
+        <span class="key">${idx + 1}</span><span>${esc(cn ? o.cn : o.w)}</span>
+      </button>`).join('')}</div>`;
+  }
+  function markOptions(q, idx) {
+    $app.querySelectorAll('.option').forEach((b, i) => {
+      b.disabled = true;
+      if (q.options[i] === q.w) b.classList.add('correct');
+      else if (i === idx) b.classList.add('wrong');
+    });
+  }
+
+  // 带自动清理的 setTimeout：离开当前页面时一并取消
+  function makeLater() {
+    const pending = new Set();
+    onCleanup(() => pending.forEach(clearTimeout));
+    return (fn, ms) => {
+      const t = setTimeout(() => { pending.delete(t); fn(); }, ms);
+      pending.add(t);
+      return t;
+    };
+  }
+
+  // 挑战类玩法的开始页：说明规则、显示纪录
+  function introScreen({ icon, title, rules, best, onStart }) {
+    $app.innerHTML = `
+      <div class="game-head"><button class="icon-btn" data-action="quit" aria-label="退出">✕</button></div>
+      <section class="card intro">
+        <div class="intro-icon">${icon}</div>
+        <h2>${title}</h2>
+        <ul class="rules">${rules.map((r) => `<li>${r}</li>`).join('')}</ul>
+        ${best ? `<span class="pill">🏅 ${esc(best)}</span>` : ''}
+        <button class="btn" data-action="start">开始 ↵</button>
+      </section>`;
+    $app.onclick = (e) => {
+      if (quitHandler(e)) return;
+      if (e.target.closest('[data-action="start"]')) onStart();
+    };
+    onKey = (e) => {
+      if (e.key === 'Escape') go('home');
+      else if (e.key === 'Enter' && e.target.tagName !== 'BUTTON') { e.preventDefault(); onStart(); }
+    };
   }
 
   /* ======================= 选择题（极速 / 听力 / 错题） ======================= */
@@ -463,17 +624,10 @@
 
     function buildQ() {
       const w = cfg.words[g.i];
-      const dir = cfg.kind === 'listen' ? 'listen' : Math.random() < 0.5 ? 'en2cn' : 'cn2en';
-      const label = (x) => (dir === 'en2cn' ? x.cn : normalize(x.w));
-      const seen = new Set([label(w)]);
-      const distract = [];
-      for (const x of shuffle(book.words)) {
-        if (distract.length >= 3) break;
-        if (x.w === w.w || seen.has(label(x))) continue;
-        seen.add(label(x));
-        distract.push(x);
-      }
-      return { w, dir, options: shuffle([w, ...distract]) };
+      const dir = cfg.kind === 'listen' ? 'listen' : cfg.kind === 'cloze' ? 'cloze' : Math.random() < 0.5 ? 'en2cn' : 'cn2en';
+      const q = buildQuestion(book, w, dir);
+      if (dir === 'cloze') q.cloze = findInSentence(w);
+      return q;
     }
 
     function headExtra() {
@@ -492,6 +646,11 @@
         prompt = `<div class="prompt-label">选择对应的英文单词</div>
           <div class="prompt-cn">${esc(q.w.cn)}</div>
           <div><span class="pos">${esc(q.w.pos)}</span></div>`;
+      } else if (q.dir === 'cloze') {
+        const c = q.cloze;
+        prompt = `<div class="prompt-label">读句子，选出空格里的单词</div>
+          <div class="cloze-cn">${esc(q.w.exCn)}</div>
+          <div class="cloze-en">${esc(q.w.ex.slice(0, c.start))}<span class="blank" id="blank" style="min-width:${Math.max(3, c.form.length)}ch"></span>${esc(q.w.ex.slice(c.end))}</div>`;
       } else {
         prompt = `<div class="prompt-label">听发音，选出正确的单词</div>
           <button class="big-speaker" data-action="replay" aria-label="再听一遍 (R)">🔊</button>
@@ -505,12 +664,7 @@
         ${gameHead(g.i, cfg.words.length, headExtra())}
         ${cfg.timer ? '<div class="timer"><i id="timer-bar" style="width:100%"></i></div>' : ''}
         <section class="card prompt">${prompt}</section>
-        <div class="options">
-          ${q.options.map((o, idx) => `
-            <button class="option ${q.dir === 'en2cn' ? '' : 'word'}" data-action="pick" data-idx="${idx}">
-              <span class="key">${idx + 1}</span><span>${esc(q.dir === 'en2cn' ? o.cn : o.w)}</span>
-            </button>`).join('')}
-        </div>
+        ${optionsHtml(q)}
         <div id="fb"></div>`;
     }
 
@@ -533,14 +687,19 @@
       clearInterval(timerId);
       const q = g.q;
       const ok = idx >= 0 && q.options[idx] === q.w;
-      const btns = $app.querySelectorAll('.option');
-      btns.forEach((b, i) => {
-        b.disabled = true;
-        if (q.options[i] === q.w) b.classList.add('correct');
-        else if (i === idx) b.classList.add('wrong');
-      });
+      markOptions(q, idx);
+      const isCloze = q.dir === 'cloze';
+      if (isCloze) {
+        const blank = document.getElementById('blank');
+        blank.textContent = q.cloze.form;
+        blank.classList.add(ok ? 'ok' : 'bad');
+      }
       record(book, q.w, ok ? 'good' : 'again');
       const fb = document.getElementById('fb');
+      const sayIt = () => speak(isCloze ? q.w.ex : q.w.w);
+      const formNote = isCloze && normalize(q.cloze.form) !== normalize(q.w.w)
+        ? `<div class="small">句中形式：<b>${esc(q.cloze.form)}</b>（${esc(q.w.w)} 的变形）</div>` : '';
+      const detail = formNote + wordDetail(q.w, !isCloze);
       if (ok) {
         g.combo++;
         g.bestCombo = Math.max(g.bestCombo, g.combo);
@@ -550,19 +709,19 @@
         g.correct++;
         addXP(gain);
         sfx.good();
-        if (q.dir !== 'listen') speak(q.w.w);
+        if (q.dir !== 'listen') sayIt();
         fb.innerHTML = `<div class="feedback good">
-          <div class="feedback-text"><div class="feedback-title">✓ 回答正确 +${gain}${g.combo >= 2 ? ` · 连击 x${g.combo}` : ''}</div>${wordDetail(q.w)}</div>
+          <div class="feedback-text"><div class="feedback-title">✓ 回答正确 +${gain}${g.combo >= 2 ? ` · 连击 x${g.combo}` : ''}</div>${detail}</div>
           <button class="btn good" data-action="next">下一题 ↵</button></div>`;
-        autoId = setTimeout(next, 1400);
+        autoId = setTimeout(next, isCloze ? 2600 : 1400);
       } else {
         g.combo = 0;
         if (g.hearts !== null) g.hearts--;
         g.wrong.push(q.w);
         sfx.bad();
-        speak(q.w.w);
+        sayIt();
         fb.innerHTML = `<div class="feedback bad">
-          <div class="feedback-text"><div class="feedback-title">${idx < 0 ? '⏰ 时间到！' : '✗ 答错了'} 正确答案：</div>${wordDetail(q.w)}</div>
+          <div class="feedback-text"><div class="feedback-title">${idx < 0 ? '⏰ 时间到！' : '✗ 答错了'} 正确答案：</div>${detail}</div>
           <button class="btn bad" data-action="next">继续 ↵</button></div>`;
       }
       const hearts = $app.querySelector('.hearts');
@@ -642,6 +801,7 @@
               <div class="prompt-word" style="font-size:28px">${esc(w.w)}</div>
               <div class="prompt-cn"><span class="pos">${esc(w.pos)}</span>${esc(w.cn)}</div>
               ${w.ex ? `<div class="example">“${esc(w.ex)}”</div>` : ''}
+              ${w.exCn ? `<div class="ex-cn">${esc(w.exCn)}</div>` : ''}
               <div>${speakBtn(w.ex || w.w)}</div>
             </div>
           </div>
@@ -709,7 +869,7 @@
           <div class="prompt-label">根据释义拼写单词</div>
           <div class="prompt-cn">${esc(w.cn)}</div>
           <div><span class="pos">${esc(w.pos)}</span>${w.ph ? `<span class="phonetic">${esc(w.ph)}</span>` : ''} ${speakBtn(w.w)}</div>
-          <div class="slots" id="slots"></div>
+          <div ${slotsAttrs(w.w.length)} id="slots"></div>
           <div class="muted small">共 ${w.w.replace(/ /g, '').length} 个字母</div>
         </section>
         <div style="margin-top:14px">
@@ -929,10 +1089,586 @@
     onKey = (e) => { if (e.key === 'Escape') go('home'); };
   }
 
+  /* ======================= 字母拼拼 ======================= */
+  function renderScramble({ words }) {
+    const book = currentBook();
+    const later = makeLater();
+    const g = { i: 0, correct: 0, score: 0, wrong: [] };
+    let s = null;
+
+    function setup() {
+      const w = words[g.i];
+      const chars = Array.from(w.w);
+      const letters = chars.filter((c) => /[A-Za-z]/.test(c)).map((c) => c.toLowerCase());
+      const decoys = letters.length >= 8 ? 2 : letters.length >= 5 ? 1 : 0;
+      const pool = letters.slice();
+      for (let k = 0; k < decoys; k++) pool.push('abcdefghijklmnopqrstuvwxyz'[Math.floor(Math.random() * 26)]);
+      let order = shuffle(pool);
+      for (let t = 0; t < 10 && order.join('').startsWith(letters.join('')); t++) order = shuffle(pool);
+      s = {
+        w,
+        decoys,
+        slots: chars.map((c) => (/[A-Za-z]/.test(c)
+          ? { want: c.toLowerCase(), ch: '', tile: null, hint: false, fixed: false }
+          : { want: c, ch: c, tile: null, hint: false, fixed: true })),
+        tiles: order.map((ch) => ({ ch, used: false })),
+        stack: [],
+        hints: 0,
+        tries: 0,
+        done: false,
+        success: false,
+        busy: false,
+      };
+    }
+
+    function render() {
+      const w = s.w;
+      $app.innerHTML = `
+        ${gameHead(g.i, words.length)}
+        <section class="card prompt">
+          <div class="prompt-label">点击字母，拼出单词${s.decoys ? `（有 ${s.decoys} 个多余字母）` : ''}</div>
+          <div class="prompt-cn">${esc(w.cn)}</div>
+          <div><span class="pos">${esc(w.pos)}</span>${w.ph ? `<span class="phonetic">${esc(w.ph)}</span>` : ''}</div>
+          <div ${slotsAttrs(s.slots.length)} id="slots"></div>
+        </section>
+        <div class="letter-pool" id="pool"></div>
+        <div class="row" style="margin-top:14px">
+          <button class="btn ghost sm" data-action="undo">⌫ 撤销</button>
+          <button class="btn ghost sm" data-action="hint">💡 提示</button>
+          <span class="spacer"></span>
+          ${speakBtn(w.w)}
+        </div>
+        <div id="fb"></div>`;
+      draw();
+    }
+
+    function draw() {
+      document.getElementById('slots').innerHTML = s.slots.map((sl, i) => {
+        if (sl.fixed) return `<span class="slot space">${sl.want === ' ' ? '' : esc(sl.want)}</span>`;
+        const look = s.done ? (s.success ? 'ok' : 'reveal') : '';
+        const cls = ['slot', sl.ch ? 'filled' : '', sl.hint ? 'hint' : '', look].join(' ');
+        const locked = !sl.ch || sl.hint || s.done;
+        return `<button class="${cls}" data-action="slot" data-i="${i}" ${locked ? 'disabled' : ''} aria-label="第 ${i + 1} 格${sl.ch ? '：' + esc(sl.ch) : '，空'}">${esc(sl.ch)}</button>`;
+      }).join('');
+      document.getElementById('pool').innerHTML = s.tiles.map((t, k) =>
+        `<button class="letter ${t.used ? 'used' : ''}" data-action="tile" data-k="${k}" ${t.used || s.done ? 'disabled' : ''} aria-label="字母 ${esc(t.ch)}">${esc(t.ch)}</button>`).join('');
+    }
+
+    function placeTile(k, i, hint = false) {
+      if (i < 0) return;
+      s.tiles[k].used = true;
+      Object.assign(s.slots[i], { ch: s.tiles[k].ch, tile: k, hint });
+      if (!hint) s.stack.push(i);
+    }
+    function unplace(i) {
+      const sl = s.slots[i];
+      if (!sl || sl.fixed || sl.tile == null) return;
+      s.tiles[sl.tile].used = false;
+      Object.assign(sl, { ch: '', tile: null, hint: false });
+    }
+    const firstEmpty = () => s.slots.findIndex((sl) => !sl.fixed && !sl.ch);
+
+    function afterChange() {
+      draw();
+      if (s.slots.every((sl) => sl.fixed || sl.ch)) check();
+    }
+
+    function tapTile(k) {
+      if (s.done || s.busy || s.tiles[k].used) return;
+      placeTile(k, firstEmpty());
+      sfx.flip();
+      afterChange();
+    }
+    function tapSlot(i) {
+      if (s.done || s.busy) return;
+      const sl = s.slots[i];
+      if (sl.fixed || sl.hint || !sl.ch) return;
+      unplace(i);
+      s.stack = s.stack.filter((x) => x !== i);
+      draw();
+    }
+    function undo() {
+      if (s.done || s.busy) return;
+      while (s.stack.length) {
+        const i = s.stack.pop();
+        const sl = s.slots[i];
+        if (sl.ch && !sl.hint) { unplace(i); break; }
+      }
+      draw();
+    }
+
+    function hint() {
+      if (s.done || s.busy) return;
+      const i = s.slots.findIndex((sl) => !sl.fixed && !sl.hint && sl.ch !== sl.want);
+      if (i < 0) return;
+      const want = s.slots[i].want;
+      unplace(i);
+      let k = s.tiles.findIndex((t) => !t.used && t.ch === want);
+      if (k < 0) {
+        // 需要的字母被放错了位置：优先从放错的格子里取回
+        const holders = s.slots
+          .map((sl, idx) => idx)
+          .filter((idx) => { const sl = s.slots[idx]; return !sl.fixed && !sl.hint && sl.tile != null && s.tiles[sl.tile].ch === want; });
+        unplace(holders.find((idx) => s.slots[idx].want !== want) ?? holders[0]);
+        k = s.tiles.findIndex((t) => !t.used && t.ch === want);
+      }
+      placeTile(k, i, true);
+      s.stack = s.stack.filter((x) => s.slots[x].ch && !s.slots[x].hint);
+      s.hints++;
+      if (s.hints >= s.slots.filter((sl) => !sl.fixed).length) return fail();
+      afterChange();
+    }
+
+    function check() {
+      if (s.slots.every((sl) => sl.fixed || sl.ch === sl.want)) return success();
+      s.tries++;
+      sfx.bad();
+      const box = document.getElementById('slots');
+      box.classList.remove('shake');
+      void box.offsetWidth;
+      box.classList.add('shake');
+      if (s.tries >= 2) return fail();
+      toast('顺序不对，再试一次！');
+      s.busy = true;
+      later(() => {
+        s.slots.forEach((sl, i) => { if (!sl.hint) unplace(i); });
+        s.stack = [];
+        s.busy = false;
+        draw();
+      }, 550);
+    }
+
+    function success() {
+      s.done = true;
+      s.success = true;
+      record(book, s.w, s.hints === 0 && s.tries === 0 ? 'good' : 'hard');
+      const gain = Math.max(4, 14 - s.hints * 4 - s.tries * 3);
+      g.score += gain;
+      g.correct++;
+      addXP(gain);
+      sfx.good();
+      speak(s.w.w);
+      draw();
+      document.getElementById('fb').innerHTML = `<div class="feedback good">
+        <div class="feedback-text"><div class="feedback-title">✓ 拼对了 +${gain}</div>${wordDetail(s.w)}</div>
+        <button class="btn good" data-action="next">下一个 ↵</button></div>`;
+    }
+
+    function fail() {
+      s.done = true;
+      s.success = false;
+      record(book, s.w, 'again');
+      g.wrong.push(s.w);
+      s.slots.forEach((sl) => { if (!sl.fixed) sl.ch = sl.want; });
+      sfx.bad();
+      speak(s.w.w);
+      draw();
+      document.getElementById('fb').innerHTML = `<div class="feedback bad">
+        <div class="feedback-text"><div class="feedback-title">✗ 正确拼写：</div>${wordDetail(s.w)}</div>
+        <button class="btn bad" data-action="next">继续 ↵</button></div>`;
+    }
+
+    function next() {
+      if (!s.done) return;
+      g.i++;
+      if (g.i >= words.length) {
+        return go('result', { title: '字母拼拼', correct: g.correct, total: words.length, score: g.score, wrong: g.wrong, again: () => startMode('scramble') });
+      }
+      setup();
+      render();
+    }
+
+    $app.onclick = (e) => {
+      if (quitHandler(e)) return;
+      const el = e.target.closest('[data-action]');
+      if (!el) return;
+      const a = el.dataset.action;
+      if (a === 'tile') tapTile(Number(el.dataset.k));
+      else if (a === 'slot') tapSlot(Number(el.dataset.i));
+      else if (a === 'undo') undo();
+      else if (a === 'hint') hint();
+      else if (a === 'next') next();
+    };
+    onKey = (e) => {
+      if (e.key === 'Escape') return go('home');
+      if (s.done) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); next(); }
+        return;
+      }
+      if (e.key === 'Backspace') { e.preventDefault(); undo(); return; }
+      if (/^[a-zA-Z]$/.test(e.key)) {
+        const k = s.tiles.findIndex((t) => !t.used && t.ch === e.key.toLowerCase());
+        if (k >= 0) tapTile(k);
+      }
+    };
+
+    setup();
+    render();
+  }
+
+  /* ======================= 60 秒挑战 ======================= */
+  function renderBlitz() {
+    const book = currentBook();
+    const key = 'blitz:' + book.id;
+    const TOTAL = 60000;
+    const PENALTY = 3000;
+    const prev = state.best[key];
+
+    introScreen({
+      icon: '⏱️',
+      title: '60 秒挑战',
+      rules: [
+        '60 秒内尽可能多地答对题目',
+        '英译中、中译英随机出现，也可以按 1–4 键作答',
+        '答错扣 3 秒；连续答对，经验加成越高',
+      ],
+      best: prev != null ? `${book.name} · 最佳 ${prev} 题` : '',
+      onStart: start,
+    });
+
+    function start() {
+      const later = makeLater();
+      const stream = wordStream(book);
+      const g = { left: TOTAL, last: 0, count: 0, answered: 0, combo: 0, bestCombo: 0, xp: 0, wrong: [], q: null, lock: true, over: false };
+      let raf = 0;
+      onCleanup(() => cancelAnimationFrame(raf));
+
+      $app.innerHTML = `
+        <div class="game-head">
+          <button class="icon-btn" data-action="quit" aria-label="退出">✕</button>
+          <div class="bar"><i id="blitz-bar" style="width:100%; background: var(--warn)"></i></div>
+          <span class="clock-wrap" id="clock-wrap"><span class="blitz-clock" id="clock">60.0</span></span>
+          <span class="pill" title="答对题数">✅ <b id="count">0</b></span>
+          <span class="combo" id="combo"></span>
+        </div>
+        <div id="blitz-q"></div>`;
+      const clock = document.getElementById('clock');
+      const bar = document.getElementById('blitz-bar');
+
+      function nextQ() {
+        if (g.over) return;
+        const dir = Math.random() < 0.5 ? 'en2cn' : 'cn2en';
+        const q = (g.q = buildQuestion(book, stream(), dir));
+        document.getElementById('blitz-q').innerHTML = `
+          <section class="card prompt compact">
+            ${dir === 'en2cn'
+              ? `<div class="prompt-label">选择中文释义</div><div class="prompt-word">${esc(q.w.w)}</div>${q.w.ph ? `<div class="phonetic">${esc(q.w.ph)}</div>` : ''}`
+              : `<div class="prompt-label">选择英文单词</div><div class="prompt-cn">${esc(q.w.cn)}</div><div><span class="pos">${esc(q.w.pos)}</span></div>`}
+          </section>
+          ${optionsHtml(q)}`;
+        g.lock = false;
+      }
+
+      function pick(idx) {
+        if (g.lock || g.over) return;
+        g.lock = true;
+        const q = g.q;
+        const ok = q.options[idx] === q.w;
+        markOptions(q, idx);
+        g.answered++;
+        record(book, q.w, ok ? 'good' : 'again');
+        if (ok) {
+          g.count++;
+          g.combo++;
+          g.bestCombo = Math.max(g.bestCombo, g.combo);
+          const gain = 4 + Math.min(g.combo, 6);
+          g.xp += gain;
+          addXP(gain);
+          sfx.good();
+          document.getElementById('count').textContent = g.count;
+          later(nextQ, 250);
+        } else {
+          g.combo = 0;
+          g.left -= PENALTY;
+          if (!g.wrong.includes(q.w)) g.wrong.push(q.w);
+          sfx.bad();
+          const p = document.createElement('span');
+          p.className = 'penalty';
+          p.textContent = '-3s';
+          document.getElementById('clock-wrap').appendChild(p);
+          later(() => p.remove(), 900);
+          later(nextQ, 800);
+        }
+        document.getElementById('combo').textContent = g.combo >= 2 ? `🔥x${g.combo}` : '';
+      }
+
+      function tick(now) {
+        if (g.over) return;
+        g.left -= Math.min(now - g.last, 100);
+        g.last = now;
+        const secs = Math.max(0, g.left) / 1000;
+        clock.textContent = secs.toFixed(1);
+        clock.classList.toggle('low', secs <= 10);
+        bar.style.width = (Math.max(0, g.left) / TOTAL) * 100 + '%';
+        if (g.left <= 0) finish();
+        else raf = requestAnimationFrame(tick);
+      }
+
+      function finish() {
+        g.over = true;
+        const newBest = g.count > 0 && (prev == null || g.count > prev);
+        if (newBest) state.best[key] = g.count;
+        state.stats.bestBlitz = Math.max(state.stats.bestBlitz || 0, g.count);
+        state.stats.bestCombo = Math.max(state.stats.bestCombo, g.bestCombo);
+        save();
+        go('result', {
+          title: '60 秒挑战',
+          correct: g.count,
+          total: g.answered,
+          score: g.xp,
+          bestCombo: g.bestCombo,
+          wrong: g.wrong,
+          stars: g.count >= 20 ? 3 : g.count >= 12 ? 2 : g.count >= 6 ? 1 : 0,
+          note: `⏱ 60 秒答对 ${g.count} 题${newBest ? ' · 🎉 新纪录！' : prev != null ? `（最佳 ${prev} 题）` : ''}`,
+          again: () => startMode('blitz'),
+        });
+      }
+
+      $app.onclick = (e) => {
+        if (quitHandler(e)) return;
+        const el = e.target.closest('[data-action="pick"]');
+        if (el) pick(Number(el.dataset.idx));
+      };
+      onKey = (e) => {
+        if (e.key === 'Escape') return go('home');
+        if (/^[1-4]$/.test(e.key)) { e.preventDefault(); pick(Number(e.key) - 1); }
+      };
+
+      nextQ();
+      raf = requestAnimationFrame((now) => { g.last = now; tick(now); });
+    }
+  }
+
+  /* ======================= 单词雨 ======================= */
+  function renderRain() {
+    const book = currentBook();
+    const key = 'rain:' + book.id;
+    const prev = state.best[key];
+
+    introScreen({
+      icon: '🌧️',
+      title: '单词雨',
+      rules: [
+        '中文释义会像雨滴一样落下，下面提示首字母和字母个数',
+        '在它落地之前输入对应的英文单词，拼对就会消除',
+        '每消除 6 个进入下一波，雨越下越快；漏掉 3 个游戏结束',
+      ],
+      best: prev != null ? `${book.name} · 最高 ${prev} 分` : '',
+      onStart: start,
+    });
+
+    function start() {
+      const later = makeLater();
+      const stream = wordStream(book);
+      const g = { lives: 3, score: 0, pops: 0, misses: 0, level: 1, xp: 0, drops: [], wrong: [], last: 0, spawnIn: 0, paused: false, over: false, noteEl: null };
+      let raf = 0;
+      const onVis = () => { if (document.hidden) setPaused(true); };
+      document.addEventListener('visibilitychange', onVis);
+      onCleanup(() => {
+        cancelAnimationFrame(raf);
+        document.removeEventListener('visibilitychange', onVis);
+      });
+
+      $app.innerHTML = `
+        <div class="game-head">
+          <button class="icon-btn" data-action="quit" aria-label="退出">✕</button>
+          <span class="hearts" id="hearts" aria-label="生命值">❤️❤️❤️</span>
+          <span class="spacer"></span>
+          <span class="pill">第 <b id="lvl">1</b> 波</span>
+          <span class="pill">得分 <b id="score">0</b></span>
+          <button class="icon-btn" data-action="pause" id="pause-btn" aria-label="暂停">⏸</button>
+        </div>
+        <div class="rain-field" id="field">
+          <div class="rain-ground"></div>
+          <button class="rain-pause" id="pause-cover" data-action="resume" hidden>⏸ 已暂停，点击继续</button>
+        </div>
+        <input id="rain-input" class="spell-input rain-input" type="text" autocomplete="off" autocapitalize="off"
+          autocorrect="off" spellcheck="false" enterkeyhint="done" placeholder="看释义，输入英文单词" aria-label="输入英文单词" />`;
+      const field = document.getElementById('field');
+      const input = document.getElementById('rain-input');
+      const scoreEl = document.getElementById('score');
+      const lvlEl = document.getElementById('lvl');
+      const heartsEl = document.getElementById('hearts');
+
+      const fallTime = () => Math.max(5000, 12000 - (g.level - 1) * 1200);
+      const spawnGap = () => Math.max(1000, 2800 - (g.level - 1) * 300);
+      const maxDrops = () => Math.min(2 + g.level, 6);
+      const shortCn = (w) => senses(w.cn)[0] || w.cn;
+
+      function spawn() {
+        let w = null;
+        for (let t = 0; t < 6 && !w; t++) {
+          const c = stream();
+          if (!g.drops.some((d) => d.w === c)) w = c;
+        }
+        if (!w) return;
+        const el = document.createElement('div');
+        el.className = 'drop';
+        const hint = w.w.charAt(0) + w.w.slice(1).replace(/[A-Za-z]/g, '_');
+        el.innerHTML = `<span class="drop-cn">${esc(shortCn(w))}</span><span class="drop-hint">${esc(hint)}</span>`;
+        field.appendChild(el);
+        const h = el.offsetHeight;
+        const x = 6 + Math.random() * Math.max(0, field.clientWidth - el.offsetWidth - 12);
+        el.style.left = x + 'px';
+        const d = { w, el, h, y: -h, speed: (field.clientHeight + h) / fallTime() };
+        el.style.transform = `translateY(${d.y}px)`;
+        g.drops.push(d);
+      }
+
+      function removeDrop(d, cls) {
+        g.drops = g.drops.filter((x) => x !== d);
+        d.el.style.setProperty('--y', d.y + 'px');
+        d.el.classList.remove('target');
+        d.el.classList.add(cls);
+        later(() => d.el.remove(), 450);
+      }
+
+      function note(text) {
+        if (g.noteEl) g.noteEl.remove();
+        const n = (g.noteEl = document.createElement('div'));
+        n.className = 'rain-note';
+        n.textContent = text;
+        field.appendChild(n);
+        later(() => n.remove(), 2200);
+      }
+
+      function banner(text) {
+        const b = document.createElement('div');
+        b.className = 'rain-banner';
+        b.textContent = text;
+        field.appendChild(b);
+        later(() => b.remove(), 1300);
+        tone([523, 784], 0.1);
+      }
+
+      function miss(d) {
+        removeDrop(d, 'missed');
+        g.misses++;
+        g.lives--;
+        record(book, d.w, 'again');
+        if (!g.wrong.includes(d.w)) g.wrong.push(d.w);
+        sfx.bad();
+        const lives = Math.max(0, g.lives);
+        heartsEl.textContent = '❤️'.repeat(lives) + '🤍'.repeat(3 - lives);
+        note(`${d.w.w} = ${shortCn(d.w)}`);
+        if (g.lives <= 0) gameOver();
+      }
+
+      function onType() {
+        input.classList.remove('wrong');
+        if (g.over || g.paused) return;
+        const val = normalize(input.value);
+        let hit = null;
+        for (const d of g.drops) {
+          const target = normalize(d.w.w);
+          d.el.classList.toggle('target', val.length > 0 && target.startsWith(val));
+          if (val && target === val) hit = d;
+        }
+        if (!hit) return;
+        input.value = '';
+        g.drops.forEach((d) => d.el.classList.remove('target'));
+        removeDrop(hit, 'popped');
+        g.pops++;
+        g.score += 10 + (g.level - 1) * 5;
+        const gain = 4 + g.level;
+        g.xp += gain;
+        addXP(gain);
+        record(book, hit.w, 'good');
+        sfx.good();
+        speak(hit.w.w);
+        scoreEl.textContent = g.score;
+        const level = 1 + Math.floor(g.pops / 6);
+        if (level > g.level) {
+          g.level = level;
+          lvlEl.textContent = level;
+          banner(`第 ${level} 波！`);
+        }
+      }
+
+      function setPaused(p) {
+        if (g.over || g.paused === p) return;
+        g.paused = p;
+        document.getElementById('pause-cover').hidden = !p;
+        const btn = document.getElementById('pause-btn');
+        btn.textContent = p ? '▶' : '⏸';
+        btn.setAttribute('aria-label', p ? '继续' : '暂停');
+        input.disabled = p;
+        if (!p) input.focus();
+      }
+
+      function frame(now) {
+        if (g.over) return;
+        const dt = Math.min(now - g.last, 50);
+        g.last = now;
+        if (!g.paused) {
+          g.spawnIn -= dt;
+          if (g.spawnIn <= 0 && g.drops.length < maxDrops()) {
+            spawn();
+            g.spawnIn = spawnGap();
+          }
+          const floor = field.clientHeight - 10;
+          for (const d of g.drops.slice()) {
+            d.y += d.speed * dt;
+            d.el.style.transform = `translateY(${d.y}px)`;
+            if (d.y + d.h >= floor) miss(d);
+            if (g.over) return;
+          }
+        }
+        raf = requestAnimationFrame(frame);
+      }
+
+      function gameOver() {
+        g.over = true;
+        cancelAnimationFrame(raf);
+        input.disabled = true;
+        const newBest = g.score > 0 && (prev == null || g.score > prev);
+        if (newBest) state.best[key] = g.score;
+        state.stats.bestRainLevel = Math.max(state.stats.bestRainLevel || 0, g.level);
+        save();
+        later(() => go('result', {
+          title: '单词雨',
+          correct: g.pops,
+          total: g.pops + g.misses,
+          correctLabel: '消除',
+          score: g.xp,
+          wrong: g.wrong,
+          stars: g.pops >= 25 ? 3 : g.pops >= 15 ? 2 : g.pops >= 6 ? 1 : 0,
+          note: `🌊 坚持到第 ${g.level} 波，得分 ${g.score}${newBest ? ' · 🎉 新纪录！' : prev != null ? `（最高 ${prev} 分）` : ''}`,
+          again: () => startMode('rain'),
+        }), 900);
+      }
+
+      $app.onclick = (e) => {
+        if (quitHandler(e)) return;
+        const el = e.target.closest('[data-action]');
+        if (el && el.dataset.action === 'pause') { setPaused(!g.paused); return; }
+        if (el && el.dataset.action === 'resume') { setPaused(false); return; }
+        if (!g.paused && !g.over && e.target.closest('#field')) input.focus();
+      };
+      onKey = (e) => { if (e.key === 'Escape') go('home'); };
+      input.addEventListener('input', onType);
+      input.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        if (!input.value.trim()) return;
+        sfx.bad();
+        input.classList.remove('wrong');
+        void input.offsetWidth;
+        input.classList.add('wrong');
+        input.value = '';
+        g.drops.forEach((d) => d.el.classList.remove('target'));
+      });
+
+      input.focus();
+      raf = requestAnimationFrame((now) => { g.last = now; frame(now); });
+    }
+  }
+
+
   /* ======================= 结算 ======================= */
   function renderResult(r) {
     const acc = r.total ? r.correct / r.total : 0;
-    const stars = acc >= 0.9 ? 3 : acc >= 0.7 ? 2 : acc >= 0.4 ? 1 : 0;
+    const stars = r.stars ?? (acc >= 0.9 ? 3 : acc >= 0.7 ? 2 : acc >= 0.4 ? 1 : 0);
     const emoji = ['😅', '🙂', '😄', '🤩'][stars];
     const msg = ['别灰心，多练几次就会了！', '不错的开始，继续加油！', '很棒！离掌握又近了一步！', '太厉害了！完美表现！'][stars];
     state.stats.games++;
@@ -1184,6 +1920,9 @@ gentle | 温柔的`;
     choice: renderChoice,
     spell: renderSpell,
     match: renderMatch,
+    scramble: renderScramble,
+    blitz: renderBlitz,
+    rain: renderRain,
     result: renderResult,
     words: renderWords,
     import: renderImport,

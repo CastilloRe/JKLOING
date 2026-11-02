@@ -307,9 +307,26 @@
   });
   document.querySelector('.brand').addEventListener('click', () => go('home'));
 
+  // "跟随系统"时还原页面原有的主题设置（例如宿主页面指定的主题）
+  const hostTheme = document.documentElement.getAttribute('data-theme');
   function applyTheme() {
-    if (state.theme === 'auto') document.documentElement.removeAttribute('data-theme');
-    else document.documentElement.setAttribute('data-theme', state.theme);
+    const t = state.theme === 'auto' ? hostTheme : state.theme;
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+  }
+
+  // 页面内二次确认：第一次点击变为确认提示，3 秒内再点一次才执行
+  function armConfirm(el, label) {
+    if (el.dataset.armed === '1') return true;
+    const original = el.textContent;
+    el.dataset.armed = '1';
+    el.textContent = label;
+    setTimeout(() => {
+      if (!el.isConnected) return;
+      el.dataset.armed = '';
+      el.textContent = original;
+    }, 3000);
+    return false;
   }
 
   /* ======================= 首页 ======================= */
@@ -1081,7 +1098,7 @@ gentle | 温柔的`;
         toast(`已保存 ${words.length} 个单词 ✅`);
         go('home');
       } else if (a === 'clear') {
-        if (!confirm('确定删除自定义词库吗？其学习记录也会一并删除。')) return;
+        if (!armConfirm(el, '再点一次确认删除（学习记录也会删除）')) return;
         state.custom = [];
         Object.keys(state.progress).forEach((k) => { if (k.startsWith('custom:')) delete state.progress[k]; });
         if (state.bookId === 'custom') state.bookId = 'primary';
@@ -1149,7 +1166,7 @@ gentle | 温柔的`;
       else if (a === 'sound') state.sound = el.dataset.v === '1';
       else if (a === 'theme') { state.theme = el.dataset.v; applyTheme(); }
       else if (a === 'reset') {
-        if (!confirm('确定要清空全部学习进度、经验和成就吗？此操作无法撤销。')) return;
+        if (!armConfirm(el, '再点一次确认清空')) return;
         const keep = { custom: state.custom, theme: state.theme, sound: state.sound, goal: state.goal };
         state = { ...defaults(), ...keep };
         toast('进度已重置');

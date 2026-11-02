@@ -29,9 +29,10 @@
     progress: {},
     custom: [],
     best: {},
-    stats: { answered: 0, correct: 0, bestCombo: 0, games: 0, perfect: 0, fastMatch: false, bestBlitz: 0, bestRainLevel: 0 },
+    stats: { answered: 0, correct: 0, bestCombo: 0, games: 0, perfect: 0, fastMatch: false, bestBlitz: 0, bestRainLevel: 0, bossWins: 0, bestWhack: 0 },
     achievements: [],
     seenModes: [],
+    adventure: {},
   });
 
   function load() {
@@ -239,7 +240,9 @@
         distract.push(x);
       }
     }
-    return { w, dir, options: shuffle([w, ...distract]) };
+    const q = { w, dir, options: shuffle([w, ...distract]) };
+    if (dir === 'cloze') q.cloze = findInSentence(w);
+    return q;
   }
 
   // 在例句中找到目标词，允许常见词形变化：-s/-es/-d/-ed/-ing、双写辅音、e 结尾 +ing、y→i
@@ -265,6 +268,21 @@
     return null;
   }
   const clozePool = (book) => book.words.filter((w) => w.exCn && findInSentence(w));
+  const shortMeaning = (w) => senses(w.cn)[0] || w.cn;
+
+  // 连词成句：把例句拆成单词块，句末标点单独保留
+  function sentenceParts(ex) {
+    let text = ex.trim();
+    const m = text.match(/[.?!]+$/);
+    const end = m ? m[0] : '';
+    if (end) text = text.slice(0, -end.length).trim();
+    return { tokens: text.split(/\s+/), end };
+  }
+  const sentencePool = (book) => book.words.filter((w) => {
+    if (!w.ex || !w.exCn) return false;
+    const n = sentenceParts(w.ex).tokens.length;
+    return n >= 3 && n <= 12;
+  });
 
   function touchDay() {
     const today = dayStr();
@@ -327,6 +345,9 @@
     { id: 'fast', icon: '⚡', name: '闪电手', desc: '20 秒内完成连连看', test: () => state.stats.fastMatch },
     { id: 'blitz20', icon: '⏱️', name: '争分夺秒', desc: '60 秒挑战答对 20 题', test: () => state.stats.bestBlitz >= 20 },
     { id: 'rain3', icon: '🌧️', name: '雨中英雄', desc: '单词雨坚持到第 3 波', test: () => state.stats.bestRainLevel >= 3 },
+    { id: 'whack20', icon: '🔨', name: '神锤手', desc: '打地鼠一局打中 20 只', test: () => (state.stats.bestWhack || 0) >= 20 },
+    { id: 'stage1', icon: '🗡️', name: '初战告捷', desc: '在单词闯关中通过一关', test: () => Object.values(state.adventure || {}).some((a) => Array.isArray(a) && a.some((x) => x > 0)) },
+    { id: 'boss', icon: '🐉', name: '屠龙勇士', desc: '打败任意一个 BOSS', test: () => (state.stats.bossWins || 0) >= 1 },
     { id: 'm10', icon: '🌟', name: '小有所成', desc: '掌握 10 个单词', test: () => masteredTotal() >= 10 },
     { id: 'm50', icon: '👑', name: '词汇达人', desc: '掌握 50 个单词', test: () => masteredTotal() >= 50 },
     { id: 's3', icon: '📅', name: '三天打卡', desc: '连续学习 3 天', test: () => state.streak >= 3 },
@@ -408,16 +429,19 @@
     { id: 'quiz', group: 'practice', icon: '⚡', name: '极速选择', desc: '限时作答，连击加分', color: '#b9a8ff' },
     { id: 'listen', group: 'practice', icon: '🎧', name: '听音辨词', desc: '听发音，选出单词', color: '#9fd0ff' },
     { id: 'spell', group: 'practice', icon: '⌨️', name: '拼写大师', desc: '看释义，拼出单词', color: '#8fe0b8' },
-    { id: 'cloze', group: 'practice', icon: '📝', name: '例句填空', desc: '读懂句子，选词填空', color: '#d6e88f', isNew: true },
-    { id: 'scramble', group: 'practice', icon: '🔤', name: '字母拼拼', desc: '点字母，拼出单词', color: '#a7e3e6', isNew: true },
-    { id: 'match', group: 'practice', icon: '🧩', name: '连连看', desc: '英汉配对，挑战最快', color: '#ffb3c6' },
-    { id: 'blitz', group: 'challenge', icon: '⏱️', name: '60 秒挑战', desc: '一分钟内答对越多越好', color: '#ff9f9f', isNew: true },
-    { id: 'rain', group: 'challenge', icon: '🌧️', name: '单词雨', desc: '打字消灭落下的单词', color: '#c3d0e0', isNew: true },
+    { id: 'dictation', group: 'practice', icon: '🖊️', name: '听写', desc: '听发音，写出单词', color: '#f5c6a5', isNew: true },
+    { id: 'cloze', group: 'practice', icon: '📝', name: '例句填空', desc: '读懂句子，选词填空', color: '#d6e88f' },
+    { id: 'sentence', group: 'practice', icon: '🧱', name: '连词成句', desc: '按中文意思排好句子', color: '#c5b8f0', isNew: true },
+    { id: 'scramble', group: 'game', icon: '🔤', name: '字母拼拼', desc: '点字母，拼出单词', color: '#a7e3e6' },
+    { id: 'match', group: 'game', icon: '🧩', name: '连连看', desc: '英汉配对，挑战最快', color: '#ffb3c6' },
+    { id: 'whack', group: 'game', icon: '🔨', name: '单词打地鼠', desc: '找到意思对的地鼠，敲它', color: '#e8cf9a', isNew: true },
+    { id: 'blitz', group: 'game', icon: '⏱️', name: '60 秒挑战', desc: '一分钟内答对越多越好', color: '#ff9f9f' },
+    { id: 'rain', group: 'game', icon: '🌧️', name: '单词雨', desc: '打字消灭落下的单词', color: '#c3d0e0' },
   ];
   const MODE_GROUPS = [
     { id: 'learn', title: '📖 学习' },
     { id: 'practice', title: '✍️ 练习' },
-    { id: 'challenge', title: '🏆 挑战' },
+    { id: 'game', title: '🎮 游戏' },
   ];
 
   function modeBest(id, book) {
@@ -426,6 +450,7 @@
     if (id === 'match') return `最快 ${b.toFixed(1)} 秒`;
     if (id === 'blitz') return `最佳 ${b} 题`;
     if (id === 'rain') return `最高 ${b} 分`;
+    if (id === 'whack') return `最佳 ${b} 只`;
     return '';
   }
 
@@ -479,11 +504,15 @@
         <p class="muted small">当前词库：已学 ${bs.learned} 词，待复习 ${bs.due} 词，已掌握 ${bs.mastered} 词</p>
       </section>
 
+      <section class="section">
+        <h2 class="section-title">⚔️ 冒险</h2>
+        ${adventureBanner(book)}
+      </section>
       ${MODE_GROUPS.map((grp) => {
         const ms = MODES.filter((m) => m.group === grp.id);
         return `<section class="section">
           <h2 class="section-title">${grp.title}</h2>
-          <div class="modes ${ms.length === 2 ? 'pair' : ''}">${ms.map((m) => modeCard(m, book, wrongCount)).join('')}</div>
+          <div class="modes count-${ms.length}">${ms.map((m) => modeCard(m, book, wrongCount)).join('')}</div>
         </section>`;
       }).join('')}
 
@@ -541,6 +570,17 @@
     }
     else if (id === 'blitz') go('blitz');
     else if (id === 'rain') go('rain');
+    else if (id === 'whack') go('whack');
+    else if (id === 'adventure') go('adventure');
+    else if (id === 'dictation') {
+      if (!canSpeak) toast('当前浏览器不支持语音朗读，将以音标代替', 2600);
+      go('spell', { words: pickWords(book, 8), dictation: true });
+    }
+    else if (id === 'sentence') {
+      const pool = sentencePool(book);
+      if (!pool.length) { toast('这个词库没有可用的例句，换个内置词库试试', 2600); return; }
+      go('sentence', { words: pickWords(book, Math.min(6, pool.length), pool) });
+    }
   }
 
   /* ======================= 通用组件 ======================= */
@@ -581,6 +621,58 @@
       if (q.options[i] === q.w) b.classList.add('correct');
       else if (i === idx) b.classList.add('wrong');
     });
+  }
+
+  // 四选一题目的题干（选择、听力、例句填空、闯关共用）
+  function promptHtml(q) {
+    const w = q.w;
+    if (q.dir === 'en2cn') {
+      return `<div class="prompt-label">选择正确的中文释义</div>
+        <div class="prompt-word">${esc(w.w)}</div>
+        <div>${w.ph ? `<span class="phonetic">${esc(w.ph)}</span>` : ''} ${speakBtn(w.w)}</div>`;
+    }
+    if (q.dir === 'cn2en') {
+      return `<div class="prompt-label">选择对应的英文单词</div>
+        <div class="prompt-cn">${esc(w.cn)}</div>
+        <div><span class="pos">${esc(w.pos)}</span></div>`;
+    }
+    if (q.dir === 'cloze') {
+      const c = q.cloze;
+      return `<div class="prompt-label">读句子，选出空格里的单词</div>
+        <div class="cloze-cn">${esc(w.exCn)}</div>
+        <div class="cloze-en">${esc(w.ex.slice(0, c.start))}<span class="blank" id="blank" style="min-width:${Math.max(3, c.form.length)}ch"></span>${esc(w.ex.slice(c.end))}</div>`;
+    }
+    return `<div class="prompt-label">听发音，选出正确的单词</div>
+      <button class="big-speaker" data-action="replay" aria-label="再听一遍 (R)">🔊</button>
+      <div class="row" style="justify-content:center">
+        <button class="btn ghost sm" data-action="replay">🔁 再听一遍</button>
+        <button class="btn ghost sm" data-action="slow">🐢 慢速</button>
+      </div>
+      ${!canSpeak || !state.sound ? `<div class="phonetic" style="margin-top:8px">${state.sound ? '浏览器不支持朗读' : '声音已关闭'}，提示音标：${esc(w.ph || '—')}</div>` : ''}`;
+  }
+
+  // 揭晓答案：标记选项、填好例句空格、朗读，返回解析内容
+  function revealAnswer(q, idx, ok) {
+    markOptions(q, idx);
+    const isCloze = q.dir === 'cloze';
+    if (isCloze) {
+      const blank = document.getElementById('blank');
+      if (blank) {
+        blank.textContent = q.cloze.form;
+        blank.classList.add(ok ? 'ok' : 'bad');
+      }
+    }
+    if (!ok || q.dir !== 'listen') speak(isCloze ? q.w.ex : q.w.w);
+    const formNote = isCloze && normalize(q.cloze.form) !== normalize(q.w.w)
+      ? `<div class="small">句中形式：<b>${esc(q.cloze.form)}</b>（${esc(q.w.w)} 的变形）</div>` : '';
+    return formNote + wordDetail(q.w, !isCloze);
+  }
+
+  function restartAnim(el, cls) {
+    if (!el) return;
+    el.classList.remove(cls);
+    void el.offsetWidth;
+    el.classList.add(cls);
   }
 
   // 带自动清理的 setTimeout：离开当前页面时一并取消
@@ -625,9 +717,7 @@
     function buildQ() {
       const w = cfg.words[g.i];
       const dir = cfg.kind === 'listen' ? 'listen' : cfg.kind === 'cloze' ? 'cloze' : Math.random() < 0.5 ? 'en2cn' : 'cn2en';
-      const q = buildQuestion(book, w, dir);
-      if (dir === 'cloze') q.cloze = findInSentence(w);
-      return q;
+      return buildQuestion(book, w, dir);
     }
 
     function headExtra() {
@@ -637,29 +727,7 @@
 
     function render() {
       const q = g.q;
-      let prompt;
-      if (q.dir === 'en2cn') {
-        prompt = `<div class="prompt-label">选择正确的中文释义</div>
-          <div class="prompt-word">${esc(q.w.w)}</div>
-          <div>${q.w.ph ? `<span class="phonetic">${esc(q.w.ph)}</span>` : ''} ${speakBtn(q.w.w)}</div>`;
-      } else if (q.dir === 'cn2en') {
-        prompt = `<div class="prompt-label">选择对应的英文单词</div>
-          <div class="prompt-cn">${esc(q.w.cn)}</div>
-          <div><span class="pos">${esc(q.w.pos)}</span></div>`;
-      } else if (q.dir === 'cloze') {
-        const c = q.cloze;
-        prompt = `<div class="prompt-label">读句子，选出空格里的单词</div>
-          <div class="cloze-cn">${esc(q.w.exCn)}</div>
-          <div class="cloze-en">${esc(q.w.ex.slice(0, c.start))}<span class="blank" id="blank" style="min-width:${Math.max(3, c.form.length)}ch"></span>${esc(q.w.ex.slice(c.end))}</div>`;
-      } else {
-        prompt = `<div class="prompt-label">听发音，选出正确的单词</div>
-          <button class="big-speaker" data-action="replay" aria-label="再听一遍 (R)">🔊</button>
-          <div class="row" style="justify-content:center">
-            <button class="btn ghost sm" data-action="replay">🔁 再听一遍</button>
-            <button class="btn ghost sm" data-action="slow">🐢 慢速</button>
-          </div>
-          ${!canSpeak || !state.sound ? `<div class="phonetic" style="margin-top:8px">${state.sound ? '浏览器不支持朗读' : '声音已关闭'}，提示音标：${esc(q.w.ph || '—')}</div>` : ''}`;
-      }
+      const prompt = promptHtml(q);
       $app.innerHTML = `
         ${gameHead(g.i, cfg.words.length, headExtra())}
         ${cfg.timer ? '<div class="timer"><i id="timer-bar" style="width:100%"></i></div>' : ''}
@@ -687,19 +755,10 @@
       clearInterval(timerId);
       const q = g.q;
       const ok = idx >= 0 && q.options[idx] === q.w;
-      markOptions(q, idx);
       const isCloze = q.dir === 'cloze';
-      if (isCloze) {
-        const blank = document.getElementById('blank');
-        blank.textContent = q.cloze.form;
-        blank.classList.add(ok ? 'ok' : 'bad');
-      }
+      const detail = revealAnswer(q, idx, ok);
       record(book, q.w, ok ? 'good' : 'again');
       const fb = document.getElementById('fb');
-      const sayIt = () => speak(isCloze ? q.w.ex : q.w.w);
-      const formNote = isCloze && normalize(q.cloze.form) !== normalize(q.w.w)
-        ? `<div class="small">句中形式：<b>${esc(q.cloze.form)}</b>（${esc(q.w.w)} 的变形）</div>` : '';
-      const detail = formNote + wordDetail(q.w, !isCloze);
       if (ok) {
         g.combo++;
         g.bestCombo = Math.max(g.bestCombo, g.combo);
@@ -709,7 +768,6 @@
         g.correct++;
         addXP(gain);
         sfx.good();
-        if (q.dir !== 'listen') sayIt();
         fb.innerHTML = `<div class="feedback good">
           <div class="feedback-text"><div class="feedback-title">✓ 回答正确 +${gain}${g.combo >= 2 ? ` · 连击 x${g.combo}` : ''}</div>${detail}</div>
           <button class="btn good" data-action="next">下一题 ↵</button></div>`;
@@ -719,7 +777,6 @@
         if (g.hearts !== null) g.hearts--;
         g.wrong.push(q.w);
         sfx.bad();
-        sayIt();
         fb.innerHTML = `<div class="feedback bad">
           <div class="feedback-text"><div class="feedback-title">${idx < 0 ? '⏰ 时间到！' : '✗ 答错了'} 正确答案：</div>${detail}</div>
           <button class="btn bad" data-action="next">继续 ↵</button></div>`;
@@ -857,18 +914,32 @@
   }
 
   /* ======================= 拼写 ======================= */
-  function renderSpell({ words }) {
+  function renderSpell({ words, dictation = false }) {
     const book = currentBook();
-    const g = { i: 0, attempts: 0, hints: 0, done: false, correct: 0, score: 0, wrong: [] };
+    const later = makeLater();
+    const g = { i: 0, attempts: 0, hints: 0, meaning: false, done: false, correct: 0, score: 0, wrong: [] };
+    const revealMeaning = () => {
+      const el = document.getElementById('spell-cn');
+      if (el) el.hidden = false;
+    };
 
     function render() {
       const w = words[g.i];
       $app.innerHTML = `
         ${gameHead(g.i, words.length)}
         <section class="card prompt">
+          ${dictation ? `
+          <div class="prompt-label">听写：听发音，写出单词</div>
+          <button class="big-speaker" data-action="replay" aria-label="再听一遍">🔊</button>
+          <div class="row" style="justify-content:center">
+            <button class="btn ghost sm" data-action="replay">🔁 再听一遍</button>
+            <button class="btn ghost sm" data-action="slow">🐢 慢速</button>
+          </div>
+          ${!canSpeak || !state.sound ? `<div class="phonetic" style="margin-top:8px">${state.sound ? '浏览器不支持朗读' : '声音已关闭'}，提示音标：${esc(w.ph || '—')}</div>` : ''}
+          <div class="prompt-cn" id="spell-cn" ${g.meaning ? '' : 'hidden'}><span class="pos">${esc(w.pos)}</span>${esc(w.cn)}</div>` : `
           <div class="prompt-label">根据释义拼写单词</div>
           <div class="prompt-cn">${esc(w.cn)}</div>
-          <div><span class="pos">${esc(w.pos)}</span>${w.ph ? `<span class="phonetic">${esc(w.ph)}</span>` : ''} ${speakBtn(w.w)}</div>
+          <div><span class="pos">${esc(w.pos)}</span>${w.ph ? `<span class="phonetic">${esc(w.ph)}</span>` : ''} ${speakBtn(w.w)}</div>`}
           <div ${slotsAttrs(w.w.length)} id="slots"></div>
           <div class="muted small">共 ${w.w.replace(/ /g, '').length} 个字母</div>
         </section>
@@ -877,7 +948,7 @@
             maxlength="${w.w.length}" placeholder="在这里输入单词" aria-label="输入单词拼写" />
         </div>
         <div class="row" style="margin-top:12px">
-          <button class="btn ghost" data-action="hint">💡 提示</button>
+          <button class="btn ghost" data-action="hint" id="hint-btn">${dictation && !g.meaning ? '💡 看释义' : '💡 提示字母'}</button>
           <span class="spacer"></span>
           <button class="btn" data-action="check" id="check-btn">提交 ↵</button>
         </div>
@@ -906,6 +977,13 @@
     function hint() {
       if (g.done) return;
       const w = words[g.i];
+      if (dictation && !g.meaning) {
+        g.meaning = true;
+        revealMeaning();
+        document.getElementById('hint-btn').textContent = '💡 提示字母';
+        document.getElementById('spell').focus();
+        return;
+      }
       g.hints++;
       const input = document.getElementById('spell');
       if (g.hints >= w.w.length) { input.value = w.w; return fail(); }
@@ -933,6 +1011,7 @@
     function success() {
       const w = words[g.i];
       g.done = true;
+      revealMeaning();
       const q = g.hints === 0 && g.attempts === 0 ? 'good' : 'hard';
       record(book, w, q);
       const gain = Math.max(4, 15 - g.hints * 4 - g.attempts * 4);
@@ -953,6 +1032,7 @@
     function fail() {
       const w = words[g.i];
       g.done = true;
+      revealMeaning();
       record(book, w, 'again');
       g.wrong.push(w);
       sfx.bad();
@@ -969,10 +1049,11 @@
     function next() {
       g.i++;
       if (g.i >= words.length) {
-        return go('result', { title: '拼写大师', correct: g.correct, total: words.length, answered: words.length, score: g.score, wrong: g.wrong, again: () => startMode('spell') });
+        return go('result', { title: dictation ? '听写' : '拼写大师', correct: g.correct, total: words.length, score: g.score, wrong: g.wrong, again: () => startMode(dictation ? 'dictation' : 'spell') });
       }
-      Object.assign(g, { attempts: 0, hints: 0, done: false });
+      Object.assign(g, { attempts: 0, hints: 0, meaning: false, done: false });
       render();
+      if (dictation) later(() => speak(words[g.i].w), 300);
     }
 
     $app.onclick = (e) => {
@@ -983,12 +1064,15 @@
       if (a === 'hint') hint();
       else if (a === 'check') check();
       else if (a === 'next') next();
+      else if (a === 'replay') speak(words[g.i].w);
+      else if (a === 'slow') speak(words[g.i].w, 0.55);
     };
     onKey = (e) => {
       if (e.key === 'Escape') return go('home');
       if (e.key === 'Enter' && g.done) { e.preventDefault(); next(); }
     };
     render();
+    if (dictation) later(() => speak(words[0].w), 400);
   }
 
   /* ======================= 连连看 ======================= */
@@ -1665,12 +1749,725 @@
   }
 
 
+  /* ======================= 连词成句 ======================= */
+  function renderSentence({ words }) {
+    const book = currentBook();
+    const later = makeLater();
+    const g = { i: 0, correct: 0, score: 0, wrong: [] };
+    let s = null;
+
+    function setup() {
+      const w = words[g.i];
+      const { tokens, end } = sentenceParts(w.ex);
+      const hit = findInSentence(w);
+      const keyForm = hit ? hit.form.toLowerCase() : '';
+      const chips = tokens.map((t) => ({ t, used: false, key: !!keyForm && t.replace(/[^A-Za-z]/g, '').toLowerCase() === keyForm }));
+      let order = shuffle(chips);
+      for (let n = 0; n < 10 && order.map((c) => c.t).join(' ') === tokens.join(' '); n++) order = shuffle(chips);
+      s = { w, tokens, end, chips: order, answer: [], locked: 0, hints: 0, tries: 0, done: false, success: false, busy: false };
+    }
+
+    function render() {
+      $app.innerHTML = `
+        ${gameHead(g.i, words.length)}
+        <section class="card prompt">
+          <div class="prompt-label">连词成句：按中文意思排好单词</div>
+          <div class="cloze-cn">${esc(s.w.exCn)}</div>
+          <div class="sentence-answer" id="answer"></div>
+          <div class="muted small">本题单词：<b class="key-word">${esc(s.w.w)}</b> ${esc(s.w.cn)}</div>
+        </section>
+        <div class="chip-pool" id="pool"></div>
+        <div class="row" style="margin-top:14px">
+          <button class="btn ghost sm" data-action="undo">⌫ 撤销</button>
+          <button class="btn ghost sm" data-action="clear">清空</button>
+          <button class="btn ghost sm" data-action="hint">💡 提示</button>
+        </div>
+        <div id="fb"></div>`;
+      draw();
+    }
+
+    function draw() {
+      const full = s.answer.length === s.chips.length;
+      document.getElementById('answer').innerHTML = s.answer.length
+        ? s.answer.map((ci, pos) => {
+            const c = s.chips[ci];
+            const look = s.done ? (s.success ? 'ok' : 'reveal') : '';
+            const cls = ['chip', c.key ? 'key' : '', pos < s.locked ? 'hint' : '', look].join(' ');
+            const locked = pos < s.locked || s.done;
+            return `<button class="${cls}" data-action="unpick" data-pos="${pos}" ${locked ? 'disabled' : ''}>${esc(c.t)}</button>`;
+          }).join('') + (full ? `<span class="sentence-end">${esc(s.end)}</span>` : '')
+        : '<span class="muted small">点下面的单词，按顺序组成句子</span>';
+      document.getElementById('pool').innerHTML = s.chips.map((c, ci) =>
+        `<button class="chip ${c.key ? 'key' : ''} ${c.used ? 'used' : ''}" data-action="pick" data-ci="${ci}" ${c.used || s.done ? 'disabled' : ''}>${esc(c.t)}</button>`).join('');
+    }
+
+    function removeFrom(p) {
+      for (const ci of s.answer.slice(p)) s.chips[ci].used = false;
+      s.answer.length = p;
+    }
+    const firstWrong = () => {
+      let p = 0;
+      while (p < s.answer.length && s.chips[s.answer[p]].t === s.tokens[p]) p++;
+      return p;
+    };
+
+    function pick(ci) {
+      if (s.done || s.busy || s.chips[ci].used) return;
+      s.chips[ci].used = true;
+      s.answer.push(ci);
+      sfx.flip();
+      draw();
+      if (s.answer.length === s.chips.length) check();
+    }
+    function unpick(pos) {
+      if (s.done || s.busy || pos < s.locked || pos >= s.answer.length) return;
+      const [ci] = s.answer.splice(pos, 1);
+      s.chips[ci].used = false;
+      draw();
+    }
+    function undo() {
+      if (s.answer.length > s.locked) unpick(s.answer.length - 1);
+    }
+    function clearAll() {
+      if (s.done || s.busy) return;
+      removeFrom(s.locked);
+      draw();
+    }
+
+    function hint() {
+      if (s.done || s.busy) return;
+      const p = firstWrong();
+      removeFrom(p);
+      const ci = s.chips.findIndex((c) => !c.used && c.t === s.tokens[p]);
+      s.chips[ci].used = true;
+      s.answer.push(ci);
+      s.locked = p + 1;
+      s.hints++;
+      draw();
+      if (s.hints >= s.tokens.length) return fail();
+      if (s.answer.length === s.chips.length) check();
+    }
+
+    function check() {
+      const p = firstWrong();
+      if (p === s.tokens.length) return success();
+      s.tries++;
+      sfx.bad();
+      restartAnim(document.getElementById('answer'), 'shake');
+      if (s.tries >= 2) return fail();
+      toast(p > 0 ? `前 ${p} 个词是对的，再排排后面的` : '顺序不对，再试一次！', 2200);
+      s.busy = true;
+      later(() => {
+        removeFrom(Math.max(p, s.locked));
+        s.busy = false;
+        draw();
+      }, 650);
+    }
+
+    function success() {
+      s.done = true;
+      s.success = true;
+      record(book, s.w, s.hints === 0 && s.tries === 0 ? 'good' : 'hard');
+      const gain = Math.max(4, 16 - s.hints * 3 - s.tries * 4);
+      g.score += gain;
+      g.correct++;
+      addXP(gain);
+      sfx.good();
+      speak(s.w.ex);
+      draw();
+      document.getElementById('fb').innerHTML = `<div class="feedback good">
+        <div class="feedback-text"><div class="feedback-title">✓ 句子排对了 +${gain}</div>
+          <div class="example">${esc(s.w.ex)} ${speakBtn(s.w.ex)}</div>${wordDetail(s.w, false)}</div>
+        <button class="btn good" data-action="next">下一句 ↵</button></div>`;
+    }
+
+    function fail() {
+      s.done = true;
+      s.success = false;
+      record(book, s.w, 'again');
+      g.wrong.push(s.w);
+      s.chips.forEach((c) => { c.used = false; });
+      s.answer = s.tokens.map((t) => {
+        const ci = s.chips.findIndex((c) => !c.used && c.t === t);
+        s.chips[ci].used = true;
+        return ci;
+      });
+      sfx.bad();
+      speak(s.w.ex);
+      draw();
+      document.getElementById('fb').innerHTML = `<div class="feedback bad">
+        <div class="feedback-text"><div class="feedback-title">✗ 正确的句子是：</div>
+          <div class="example">${esc(s.w.ex)} ${speakBtn(s.w.ex)}</div>${wordDetail(s.w, false)}</div>
+        <button class="btn bad" data-action="next">继续 ↵</button></div>`;
+    }
+
+    function next() {
+      if (!s.done) return;
+      g.i++;
+      if (g.i >= words.length) {
+        return go('result', { title: '连词成句', correct: g.correct, total: words.length, score: g.score, wrong: g.wrong, again: () => startMode('sentence') });
+      }
+      setup();
+      render();
+    }
+
+    $app.onclick = (e) => {
+      if (quitHandler(e)) return;
+      const el = e.target.closest('[data-action]');
+      if (!el) return;
+      const a = el.dataset.action;
+      if (a === 'pick') pick(Number(el.dataset.ci));
+      else if (a === 'unpick') unpick(Number(el.dataset.pos));
+      else if (a === 'undo') undo();
+      else if (a === 'clear') clearAll();
+      else if (a === 'hint') hint();
+      else if (a === 'next') next();
+    };
+    onKey = (e) => {
+      if (e.key === 'Escape') return go('home');
+      if (s.done) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); next(); }
+        return;
+      }
+      if (e.key === 'Backspace') { e.preventDefault(); undo(); }
+    };
+
+    setup();
+    render();
+  }
+
+  /* ======================= 单词打地鼠 ======================= */
+  function renderWhack() {
+    const book = currentBook();
+    const key = 'whack:' + book.id;
+    const prev = state.best[key];
+    const TOTAL = 45000;
+
+    introScreen({
+      icon: '🔨',
+      title: '单词打地鼠',
+      rules: [
+        '上方显示一个中文意思，地鼠会举着英文单词冒出来',
+        '找到意思对的那只，点它！电脑上也可以按 1–9 键',
+        '45 秒内打中越多越好；打错了锤子会晕 1 秒',
+      ],
+      best: prev != null ? `${book.name} · 最佳 ${prev} 只` : '',
+      onStart: start,
+    });
+
+    function start() {
+      const later = makeLater();
+      const stream = wordStream(book);
+      const g = { left: TOTAL, last: 0, hits: 0, misses: 0, combo: 0, bestCombo: 0, xp: 0, wrong: [], target: null, targetFailed: false, sinceTarget: 0, seq: 0, stunUntil: 0, over: false };
+      const holes = Array.from({ length: 9 }, () => ({ w: null, up: false, busy: false, id: 0 }));
+      let raf = 0;
+      onCleanup(() => cancelAnimationFrame(raf));
+
+      $app.innerHTML = `
+        <div class="game-head">
+          <button class="icon-btn" data-action="quit" aria-label="退出">✕</button>
+          <div class="bar"><i id="whack-bar" style="width:100%; background: var(--warn)"></i></div>
+          <span class="blitz-clock" id="clock">45.0</span>
+          <span class="pill" title="打中个数">🔨 <b id="hits">0</b></span>
+        </div>
+        <section class="card whack-target" id="target"></section>
+        <div class="whack-grid" id="grid">
+          ${holes.map((h, i) => `<button class="hole" data-action="hole" data-i="${i}" aria-label="第 ${i + 1} 个洞">
+            <span class="hole-key">${i + 1}</span>
+            <span class="mole"><span class="mole-word"></span><span class="mole-face">🐹</span></span>
+            <span class="dirt"></span>
+          </button>`).join('')}
+        </div>
+        <div class="whack-note" id="note" aria-live="polite"></div>`;
+      const grid = document.getElementById('grid');
+      const clock = document.getElementById('clock');
+      const bar = document.getElementById('whack-bar');
+      const holeEl = (i) => grid.children[i];
+      const visible = (w) => holes.some((h) => h.up && h.w === w);
+      const stayTime = () => Math.max(1100, 2100 - g.hits * 40);
+      const gapTime = () => Math.max(420, 850 - g.hits * 18);
+
+      function hideHole(i) {
+        const h = holes[i];
+        h.up = false;
+        h.id = ++g.seq;
+        holeEl(i).classList.remove('up');
+      }
+
+      function setTarget() {
+        let w = stream();
+        if (w === g.target) w = stream();
+        g.target = w;
+        g.targetFailed = false;
+        g.sinceTarget = 99;
+        // 意思相近的地鼠先缩回去，免得两只都“对”
+        holes.forEach((h, i) => { if (h.up && h.w !== w && meaningOverlap(h.w, w)) hideHole(i); });
+        document.getElementById('target').innerHTML = `
+          <div class="prompt-label">🎯 打中这个意思的单词</div>
+          <div class="prompt-cn">${esc(w.cn)}</div>
+          <div><span class="pos">${esc(w.pos)}</span><span class="combo" id="combo">${g.combo >= 2 ? `🔥x${g.combo}` : ''}</span></div>`;
+      }
+
+      function pop() {
+        if (g.over) return;
+        const free = holes.map((h, i) => i).filter((i) => !holes[i].up && !holes[i].busy);
+        if (!free.length) return;
+        const i = free[Math.floor(Math.random() * free.length)];
+        let w = null;
+        if (!visible(g.target) && (g.sinceTarget >= 2 || Math.random() < 0.4)) {
+          w = g.target;
+        } else {
+          const pool = book.words.filter((x) => x !== g.target && !visible(x) && !meaningOverlap(x, g.target));
+          if (pool.length) w = pool[Math.floor(Math.random() * pool.length)];
+          else if (!visible(g.target)) w = g.target;
+          else return;
+        }
+        g.sinceTarget = w === g.target ? 0 : g.sinceTarget + 1;
+        const h = holes[i];
+        Object.assign(h, { w, up: true, id: ++g.seq });
+        const el = holeEl(i);
+        el.querySelector('.mole-face').textContent = '🐹';
+        const label = el.querySelector('.mole-word');
+        label.textContent = w.w;
+        label.classList.toggle('long', w.w.length > 9);
+        el.classList.remove('bonk', 'oops');
+        el.classList.add('up');
+        const id = h.id;
+        later(() => { if (h.id === id && h.up) hideHole(i); }, stayTime());
+      }
+
+      function loop() {
+        if (g.over) return;
+        pop();
+        later(loop, gapTime());
+      }
+
+      function knock(i, cls, face) {
+        const h = holes[i];
+        const el = holeEl(i);
+        h.up = false;
+        h.busy = true;
+        h.id = ++g.seq;
+        el.querySelector('.mole-face').textContent = face;
+        el.classList.add(cls);
+        later(() => { el.classList.remove('up', cls); h.busy = false; }, 420);
+      }
+
+      function note(text, ok) {
+        const n = document.getElementById('note');
+        n.textContent = text;
+        n.className = 'whack-note ' + (ok ? 'ok' : 'bad');
+      }
+
+      function tap(i) {
+        if (g.over) return;
+        const h = holes[i];
+        if (!h.up || h.busy || performance.now() < g.stunUntil) return;
+        if (h.w === g.target) {
+          g.hits++;
+          g.combo++;
+          g.bestCombo = Math.max(g.bestCombo, g.combo);
+          const gain = 3 + Math.min(g.combo, 5);
+          g.xp += gain;
+          addXP(gain);
+          if (!g.targetFailed) record(book, g.target, 'good');
+          sfx.good();
+          speak(h.w.w);
+          knock(i, 'bonk', '😵');
+          document.getElementById('hits').textContent = g.hits;
+          note(`✓ ${h.w.w} = ${shortMeaning(h.w)}`, true);
+          setTarget();
+          later(pop, 200);
+        } else {
+          g.misses++;
+          g.combo = 0;
+          if (!g.targetFailed) {
+            g.targetFailed = true;
+            record(book, g.target, 'again');
+            if (!g.wrong.includes(g.target)) g.wrong.push(g.target);
+          }
+          sfx.bad();
+          knock(i, 'oops', '😝');
+          note(`✗ ${h.w.w} 是「${shortMeaning(h.w)}」`, false);
+          g.stunUntil = performance.now() + 1000;
+          grid.classList.add('stunned');
+          later(() => grid.classList.remove('stunned'), 1000);
+          const combo = document.getElementById('combo');
+          if (combo) combo.textContent = '';
+        }
+      }
+
+      function tick(now) {
+        if (g.over) return;
+        g.left -= Math.min(now - g.last, 100);
+        g.last = now;
+        const secs = Math.max(0, g.left) / 1000;
+        clock.textContent = secs.toFixed(1);
+        clock.classList.toggle('low', secs <= 10);
+        bar.style.width = (Math.max(0, g.left) / TOTAL) * 100 + '%';
+        if (g.left <= 0) finish();
+        else raf = requestAnimationFrame(tick);
+      }
+
+      function finish() {
+        g.over = true;
+        const newBest = g.hits > 0 && (prev == null || g.hits > prev);
+        if (newBest) state.best[key] = g.hits;
+        state.stats.bestWhack = Math.max(state.stats.bestWhack || 0, g.hits);
+        state.stats.bestCombo = Math.max(state.stats.bestCombo, g.bestCombo);
+        save();
+        go('result', {
+          title: '单词打地鼠',
+          correct: g.hits,
+          total: g.hits + g.misses,
+          correctLabel: '打中',
+          score: g.xp,
+          bestCombo: g.bestCombo,
+          wrong: g.wrong,
+          stars: g.hits >= 20 ? 3 : g.hits >= 12 ? 2 : g.hits >= 6 ? 1 : 0,
+          note: `🔨 45 秒打中 ${g.hits} 只${newBest ? ' · 🎉 新纪录！' : prev != null ? `（最佳 ${prev} 只）` : ''}`,
+          again: () => startMode('whack'),
+        });
+      }
+
+      $app.onclick = (e) => {
+        if (quitHandler(e)) return;
+        const el = e.target.closest('[data-action="hole"]');
+        if (el) tap(Number(el.dataset.i));
+      };
+      onKey = (e) => {
+        if (e.key === 'Escape') return go('home');
+        if (/^[1-9]$/.test(e.key)) { e.preventDefault(); tap(Number(e.key) - 1); }
+      };
+
+      setTarget();
+      later(pop, 300);
+      later(loop, 700);
+      raf = requestAnimationFrame((now) => { g.last = now; tick(now); });
+    }
+  }
+
+  /* ======================= 单词闯关 ======================= */
+  const ADV_MONSTERS = [
+    { icon: '🦇', name: '蝙蝠', place: '蝙蝠洞' },
+    { icon: '🐍', name: '毒蛇', place: '毒蛇林' },
+    { icon: '🐺', name: '野狼', place: '野狼谷' },
+    { icon: '👻', name: '幽灵', place: '幽灵古堡' },
+    { icon: '🧟', name: '僵尸', place: '僵尸墓地' },
+    { icon: '🦂', name: '巨蝎', place: '沙漠遗迹' },
+    { icon: '🕷️', name: '毒蛛', place: '蛛网深渊' },
+    { icon: '🐊', name: '鳄鱼', place: '迷雾沼泽' },
+  ];
+  const ADV_BOSSES = {
+    primary: { icon: '🦖', name: '霸王龙', place: '恐龙岛' },
+    junior: { icon: '🐙', name: '深海巨章', place: '深海神殿' },
+    senior: { icon: '👹', name: '赤鬼王', place: '赤鬼城' },
+    cet6: { icon: '🧙', name: '黑暗巫师', place: '暗影高塔' },
+    kaoyan: { icon: '🐉', name: '远古巨龙', place: '巨龙之巅' },
+  };
+  const STAGE_SIZE = 10;
+
+  // 每 10 个词一关，词数够 20 个时最后加一个 BOSS 关（题目来自整本词库）
+  function advStages(book) {
+    const n = book.words.length;
+    const count = Math.max(1, Math.ceil(n / STAGE_SIZE));
+    const stages = [];
+    for (let i = 0; i < count; i++) {
+      const m = ADV_MONSTERS[i % ADV_MONSTERS.length];
+      stages.push({ idx: i, boss: false, icon: m.icon, name: m.name, place: m.place, words: book.words.slice(i * STAGE_SIZE, (i + 1) * STAGE_SIZE), hp: 90 + i * 10 });
+    }
+    if (n >= 2 * STAGE_SIZE) {
+      const b = ADV_BOSSES[book.id] || { icon: '🐲', name: '神秘飞龙', place: '云中城' };
+      stages.push({ idx: count, boss: true, icon: b.icon, name: b.name, place: b.place, words: book.words, hp: 240 });
+    }
+    return stages;
+  }
+  function advProgress(book) {
+    if (!state.adventure || typeof state.adventure !== 'object') state.adventure = {};
+    if (!Array.isArray(state.adventure[book.id])) state.adventure[book.id] = [];
+    return state.adventure[book.id];
+  }
+  const advUnlocked = (prog, i) => i === 0 || (prog[i - 1] || 0) > 0;
+
+  function adventureBanner(book) {
+    const stages = advStages(book);
+    const prog = advProgress(book);
+    const cleared = stages.filter((st) => (prog[st.idx] || 0) > 0).length;
+    const stars = stages.reduce((sum, st) => sum + (prog[st.idx] || 0), 0);
+    const last = stages[stages.length - 1];
+    return `<button class="adv-banner" data-action="mode" data-id="adventure">
+      <span class="adv-art" aria-hidden="true">${last.icon}</span>
+      <span class="adv-body">
+        <span class="adv-title">单词闯关</span>
+        <span class="adv-desc">答对就攻击怪物，一关关打到 BOSS</span>
+        <span class="adv-meta">${esc(book.name)} · 已通关 ${cleared}/${stages.length} · ⭐ ${stars}/${stages.length * 3}</span>
+      </span>
+      <span class="adv-go">出发 →</span>
+      ${state.seenModes.includes('adventure') ? '' : '<span class="badge new">新</span>'}
+    </button>`;
+  }
+
+  function renderAdventure() {
+    const book = currentBook();
+    const stages = advStages(book);
+    const prog = advProgress(book);
+    const cleared = stages.filter((st) => (prog[st.idx] || 0) > 0).length;
+    const stars = stages.reduce((sum, st) => sum + (prog[st.idx] || 0), 0);
+    $app.innerHTML = `
+      <div class="row" style="margin-bottom:12px">
+        <button class="icon-btn" data-action="quit" aria-label="返回首页">←</button>
+        <h2>⚔️ 单词闯关</h2>
+      </div>
+      <section class="card adv-summary">
+        <div class="row"><b>${book.icon} ${esc(book.name)}</b><span class="spacer"></span><span class="pill">⭐ ${stars} / ${stages.length * 3}</span></div>
+        <div class="muted small">已通关 ${cleared} / ${stages.length} 关</div>
+        <div class="bar"><i style="width:${(cleared / stages.length) * 100}%"></i></div>
+      </section>
+      <ol class="stage-path">
+        ${stages.map((st) => {
+          const got = prog[st.idx] || 0;
+          const open = advUnlocked(prog, st.idx);
+          const current = open && !got;
+          return `<li><button class="stage ${st.boss ? 'boss' : ''} ${current ? 'current' : ''}" data-action="stage" data-i="${st.idx}" ${open ? '' : 'disabled'}>
+            <span class="stage-icon">${open ? st.icon : '🔒'}</span>
+            <span class="stage-text">
+              <b>${st.boss ? '👑 BOSS · ' : `第 ${st.idx + 1} 关 · `}${esc(st.place)}</b>
+              <span class="muted small">${st.boss ? `整本 ${st.words.length} 词` : `${st.words.length} 个单词`} · ${esc(st.name)} · 生命 ${st.hp}</span>
+            </span>
+            <span class="stage-stars" aria-label="${got} 星">${open ? '★'.repeat(got) + '☆'.repeat(3 - got) : ''}</span>
+          </button></li>`;
+        }).join('')}
+      </ol>
+      <p class="muted small">答对一题就攻击一次，连续答对伤害更高，偶尔还会暴击。答错会被怪物反击，3 颗心用完就失败。通关时剩几颗心，就得几颗星。</p>`;
+
+    $app.onclick = (e) => {
+      if (quitHandler(e)) return;
+      const el = e.target.closest('[data-action="stage"]');
+      if (el && !el.disabled) go('stage', { idx: Number(el.dataset.i) });
+    };
+    onKey = (e) => { if (e.key === 'Escape') go('home'); };
+  }
+
+  function renderStage({ idx }) {
+    const book = currentBook();
+    const st = advStages(book)[idx];
+    if (!st || !advUnlocked(advProgress(book), idx)) return go('adventure');
+    $app.innerHTML = `
+      <div class="row" style="margin-bottom:12px">
+        <button class="icon-btn" data-action="map" aria-label="返回地图">←</button>
+        <h2>${st.boss ? '👑 BOSS 关' : `第 ${idx + 1} 关`} · ${esc(st.place)}</h2>
+      </div>
+      <section class="card intro">
+        <div class="intro-icon">${st.icon}</div>
+        <h2>${esc(st.name)}</h2>
+        <div class="muted">生命 ${st.hp} · ${st.boss ? `题目来自整本「${esc(book.name)}」` : '先认识本关的单词，再开始战斗'}</div>
+        <button class="btn" data-action="fight">⚔️ 开始战斗 ↵</button>
+      </section>
+      ${st.boss ? '' : `<section class="section">
+        <h2 class="section-title">📜 本关单词（${st.words.length}）</h2>
+        <div class="stage-words">${st.words.map((w) => `<div class="word-item">
+          <div class="main"><div class="w">${esc(w.w)} <span class="phonetic small">${esc(w.ph)}</span></div>
+          <div class="m"><span class="pos">${esc(w.pos)}</span>${esc(w.cn)}</div></div>
+          ${speakBtn(w.w)}</div>`).join('')}</div>
+      </section>`}`;
+
+    $app.onclick = (e) => {
+      const el = e.target.closest('[data-action]');
+      if (!el) return;
+      const a = el.dataset.action;
+      if (a === 'map') go('adventure');
+      else if (a === 'fight') go('battle', { idx });
+      else if (a === 'speak') speak(el.dataset.w);
+    };
+    onKey = (e) => {
+      if (e.key === 'Escape') go('adventure');
+      else if (e.key === 'Enter' && e.target.tagName !== 'BUTTON') { e.preventDefault(); go('battle', { idx }); }
+    };
+  }
+
+  function renderBattle({ idx }) {
+    const book = currentBook();
+    const st = advStages(book)[idx];
+    const prog = advProgress(book);
+    if (!st || !advUnlocked(prog, idx)) return go('adventure');
+    const later = makeLater();
+    const stream = wordStream(book, st.words);
+    const g = { hp: st.hp, hearts: 3, combo: 0, bestCombo: 0, correct: 0, asked: 0, xp: 0, wrong: [], q: null, answered: true, ended: false, auto: 0 };
+    const dirsFor = (w) => {
+      const d = ['en2cn', 'cn2en'];
+      if (w.exCn && findInSentence(w)) d.push('cloze');
+      if (canSpeak && state.sound) d.push('listen');
+      return d;
+    };
+
+    $app.innerHTML = `
+      <div class="game-head">
+        <button class="icon-btn" data-action="map" aria-label="返回地图">✕</button>
+        <span class="hearts" id="hearts" aria-label="生命值">❤️❤️❤️</span>
+        <span class="spacer"></span>
+        <span class="combo" id="combo"></span>
+        <span class="pill">${st.boss ? '👑 BOSS' : `第 ${idx + 1} 关`}</span>
+      </div>
+      <section class="card battle" id="battle">
+        <div class="monster" id="monster">${st.icon}</div>
+        <div class="battle-info">
+          <div class="battle-name">${esc(st.name)}</div>
+          <div class="bar hp"><i id="hp-bar" style="width:100%"></i></div>
+          <div class="small muted">生命 <b id="hp">${st.hp}</b> / ${st.hp}</div>
+        </div>
+      </section>
+      <div id="battle-q"></div>`;
+
+    function ask() {
+      const w = stream();
+      const dirs = dirsFor(w);
+      const dir = dirs[Math.floor(Math.random() * dirs.length)];
+      g.q = buildQuestion(book, w, dir);
+      g.answered = false;
+      document.getElementById('battle-q').innerHTML = `
+        <section class="card prompt compact">${promptHtml(g.q)}</section>
+        ${optionsHtml(g.q)}
+        <div id="fb"></div>`;
+      if (dir === 'listen') later(() => speak(w.w), 300);
+    }
+
+    function pick(idxOpt) {
+      if (g.answered || g.ended) return;
+      g.answered = true;
+      const q = g.q;
+      const ok = q.options[idxOpt] === q.w;
+      const detail = revealAnswer(q, idxOpt, ok);
+      record(book, q.w, ok ? 'good' : 'again');
+      g.asked++;
+      const fb = document.getElementById('fb');
+      const mon = document.getElementById('monster');
+      if (ok) {
+        g.correct++;
+        g.combo++;
+        g.bestCombo = Math.max(g.bestCombo, g.combo);
+        const crit = Math.random() < 0.15;
+        const dmg = (10 + Math.min(g.combo - 1, 5) * 3) * (crit ? 2 : 1);
+        g.hp = Math.max(0, g.hp - dmg);
+        const gain = 8 + Math.min(g.combo - 1, 5) * 2;
+        g.xp += gain;
+        addXP(gain);
+        sfx.good();
+        restartAnim(mon, 'hit');
+        const n = document.createElement('span');
+        n.className = 'dmg' + (crit ? ' crit' : '');
+        n.textContent = (crit ? '暴击 ' : '') + '-' + dmg;
+        document.getElementById('battle').appendChild(n);
+        later(() => n.remove(), 1000);
+        document.getElementById('hp').textContent = g.hp;
+        document.getElementById('hp-bar').style.width = (g.hp / st.hp) * 100 + '%';
+        const won = g.hp <= 0;
+        if (won) later(() => mon.classList.add('defeated'), 350);
+        fb.innerHTML = `<div class="feedback good">
+          <div class="feedback-text"><div class="feedback-title">⚔️ ${crit ? '暴击！' : '命中！'}造成 ${dmg} 点伤害${g.combo >= 2 ? ` · 连击 x${g.combo}` : ''}</div>${detail}</div>
+          <button class="btn good" data-action="next">${won ? '胜利 →' : '继续 ↵'}</button></div>`;
+        g.auto = later(next, won ? 1800 : q.dir === 'cloze' ? 2400 : 1300);
+      } else {
+        g.combo = 0;
+        g.hearts--;
+        if (!g.wrong.includes(q.w)) g.wrong.push(q.w);
+        sfx.bad();
+        restartAnim(mon, 'attack');
+        restartAnim(document.getElementById('battle'), 'hurt');
+        const lives = Math.max(0, g.hearts);
+        document.getElementById('hearts').textContent = '❤️'.repeat(lives) + '🤍'.repeat(3 - lives);
+        fb.innerHTML = `<div class="feedback bad">
+          <div class="feedback-text"><div class="feedback-title">💥 ${esc(st.name)}反击了！正确答案：</div>${detail}</div>
+          <button class="btn bad" data-action="next">${g.hearts <= 0 ? '查看结果' : '继续 ↵'}</button></div>`;
+      }
+      document.getElementById('combo').textContent = g.combo >= 2 ? `🔥x${g.combo}` : '';
+    }
+
+    function next() {
+      clearTimeout(g.auto);
+      if (!g.answered || g.ended) return;
+      if (g.hp <= 0) return finish(true);
+      if (g.hearts <= 0) return finish(false);
+      ask();
+    }
+
+    function finish(win) {
+      if (g.ended) return;
+      g.ended = true;
+      const stars = win ? Math.max(1, g.hearts) : 0;
+      const before = prog[idx] || 0;
+      let bonus = 0;
+      if (win) {
+        prog[idx] = Math.max(before, stars);
+        bonus = st.boss ? 80 : 30;
+        g.xp += bonus;
+        addXP(bonus);
+        if (st.boss) state.stats.bossWins = (state.stats.bossWins || 0) + 1;
+      }
+      state.stats.bestCombo = Math.max(state.stats.bestCombo, g.bestCombo);
+      save();
+      const nxt = win ? advStages(book)[idx + 1] : null;
+      const buttons = win
+        ? [
+            ...(nxt ? [{ label: '下一关 →', fn: () => go('stage', { idx: nxt.idx }) }] : []),
+            { label: '🔄 再打一次', fn: () => go('battle', { idx }), ghost: !!nxt },
+            { label: '🗺️ 返回地图', fn: () => go('adventure'), ghost: true },
+          ]
+        : [
+            { label: '🔄 再试一次', fn: () => go('battle', { idx }) },
+            { label: '📜 复习本关单词', fn: () => go('stage', { idx }), ghost: true },
+            { label: '🗺️ 返回地图', fn: () => go('adventure'), ghost: true },
+          ];
+      go('result', {
+        title: `${st.place} · ${win ? '胜利' : '失败'}`,
+        heading: win ? `${st.place} · 胜利！` : `${st.place} · 挑战失败`,
+        emoji: win ? (st.boss ? '👑' : '🏆') : '💀',
+        message: win
+          ? (st.boss ? `你打败了${st.name}，「${book.name}」全部通关！` : `你打败了${st.name}！`)
+          : `${st.name}还剩 ${g.hp} 点生命，复习一下再来挑战！`,
+        correct: g.correct,
+        total: g.asked,
+        score: g.xp,
+        bestCombo: g.bestCombo,
+        wrong: g.wrong,
+        stars,
+        note: win ? `剩余 ${g.hearts} 颗心 · 通关奖励 +${bonus} 经验${before && stars > before ? ' · 刷新最佳' : ''}` : '',
+        buttons,
+        escape: () => go('adventure'),
+      });
+    }
+
+    $app.onclick = (e) => {
+      const el = e.target.closest('[data-action]');
+      if (!el) return;
+      const a = el.dataset.action;
+      if (a === 'map') go('adventure');
+      else if (a === 'speak') speak(el.dataset.w);
+      else if (a === 'pick') pick(Number(el.dataset.idx));
+      else if (a === 'next') next();
+      else if (a === 'replay') speak(g.q.w.w);
+      else if (a === 'slow') speak(g.q.w.w, 0.55);
+    };
+    onKey = (e) => {
+      if (e.key === 'Escape') return go('adventure');
+      if (!g.answered && /^[1-4]$/.test(e.key)) { e.preventDefault(); pick(Number(e.key) - 1); }
+      else if (g.answered && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); next(); }
+      else if (e.key.toLowerCase() === 'r' && g.q && g.q.dir === 'listen') speak(g.q.w.w);
+    };
+
+    ask();
+  }
+
+
   /* ======================= 结算 ======================= */
   function renderResult(r) {
     const acc = r.total ? r.correct / r.total : 0;
     const stars = r.stars ?? (acc >= 0.9 ? 3 : acc >= 0.7 ? 2 : acc >= 0.4 ? 1 : 0);
-    const emoji = ['😅', '🙂', '😄', '🤩'][stars];
-    const msg = ['别灰心，多练几次就会了！', '不错的开始，继续加油！', '很棒！离掌握又近了一步！', '太厉害了！完美表现！'][stars];
+    const emoji = r.emoji || ['😅', '🙂', '😄', '🤩'][stars];
+    const msg = r.message || ['别灰心，多练几次就会了！', '不错的开始，继续加油！', '很棒！离掌握又近了一步！', '太厉害了！完美表现！'][stars];
+    const buttons = r.buttons || [
+      { label: '🔄 再来一局', fn: r.again, action: 'again' },
+      { label: '🏠 返回首页', fn: () => go('home'), action: 'home', ghost: true },
+    ];
     state.stats.games++;
     if (r.correct === r.total && r.total >= 5) state.stats.perfect++;
     save();
@@ -1680,7 +2477,7 @@
     $app.innerHTML = `
       <section class="card result">
         <div class="result-emoji">${emoji}</div>
-        <h2>${esc(r.title)} · 本局结束</h2>
+        <h2>${esc(r.heading || `${r.title} · 本局结束`)}</h2>
         <div class="stars" aria-label="${stars} 星">${'★'.repeat(stars)}<span class="muted">${'☆'.repeat(3 - stars)}</span></div>
         <p class="muted">${msg}</p>
         ${r.note ? `<p><b>${esc(r.note)}</b></p>` : ''}
@@ -1691,8 +2488,7 @@
         </div>
         ${r.bestCombo >= 2 ? `<p class="muted small">本局最高连击 🔥x${r.bestCombo}</p>` : ''}
         <div class="row" style="justify-content:center">
-          <button class="btn" data-action="again">🔄 再来一局</button>
-          <button class="btn ghost" data-action="home">🏠 返回首页</button>
+          ${buttons.map((b, i) => `<button class="btn ${b.ghost ? 'ghost' : ''}" data-action="${b.action || 'btn'}" data-i="${i}">${esc(b.label)}</button>`).join('')}
         </div>
       </section>
       ${r.wrong.length ? `
@@ -1708,14 +2504,12 @@
 
     $app.onclick = (e) => {
       if (quitHandler(e)) return;
-      const el = e.target.closest('[data-action]');
-      if (!el) return;
-      if (el.dataset.action === 'again') r.again();
-      else if (el.dataset.action === 'home') go('home');
+      const el = e.target.closest('[data-i]');
+      if (el && buttons[Number(el.dataset.i)]) buttons[Number(el.dataset.i)].fn();
     };
     onKey = (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); r.again(); }
-      else if (e.key === 'Escape') go('home');
+      if (e.key === 'Enter' && e.target.tagName !== 'BUTTON') { e.preventDefault(); buttons[0].fn(); }
+      else if (e.key === 'Escape') (r.escape || (() => go('home')))();
     };
   }
 
@@ -1830,12 +2624,14 @@ gentle | 温柔的`;
         if (words.length < 4) { toast('至少需要 4 个有效单词哦'); return; }
         state.custom = words;
         state.bookId = 'custom';
+        if (state.adventure) delete state.adventure.custom;
         save();
         toast(`已保存 ${words.length} 个单词 ✅`);
         go('home');
       } else if (a === 'clear') {
         if (!armConfirm(el, '再点一次确认删除（学习记录也会删除）')) return;
         state.custom = [];
+        if (state.adventure) delete state.adventure.custom;
         Object.keys(state.progress).forEach((k) => { if (k.startsWith('custom:')) delete state.progress[k]; });
         if (state.bookId === 'custom') state.bookId = 'primary';
         save();
@@ -1923,6 +2719,11 @@ gentle | 温柔的`;
     scramble: renderScramble,
     blitz: renderBlitz,
     rain: renderRain,
+    whack: renderWhack,
+    sentence: renderSentence,
+    adventure: renderAdventure,
+    stage: renderStage,
+    battle: renderBattle,
     result: renderResult,
     words: renderWords,
     import: renderImport,

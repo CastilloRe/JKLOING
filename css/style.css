@@ -175,6 +175,22 @@ body::before {
 .hero-title { font-size: 20px; font-weight: 800; }
 .hero-goal { margin-top: 10px; font-size: 14px; }
 
+.save-chip {
+  display: inline-block; margin-top: 10px; padding: 3px 10px; border: 0; border-radius: 999px;
+  background: rgba(255, 255, 255, .2); color: #fff; font-size: 12px; font-weight: 700; text-align: left;
+}
+.save-chip.warn { background: #fff1c7; color: #6b4200; }
+.save-card { display: grid; gap: 8px; }
+.save-card p { margin: 0; }
+.save-status { font-weight: 700; }
+.save-code > * + * { margin-top: 8px; }
+.save-code summary { cursor: pointer; font-weight: 800; }
+.code-box {
+  display: block; width: 100%; padding: 10px; border-radius: 12px; border: 1px solid var(--border);
+  background: var(--surface-2); color: var(--text); resize: vertical; word-break: break-all;
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+}
+
 /* ---------- book chips ---------- */
 .books { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
 .book {

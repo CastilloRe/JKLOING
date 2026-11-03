@@ -59,22 +59,35 @@
   // 在 Claude 网页里打开时，进度会额外存到当前登录账号的私有存档里
   // （data/users/<id>/save，只有本人能读写）。有些环境（比如手机 App 内）
   // 浏览器存储每次打开都是空的，靠云存档才能在刷新、换设备后找回进度。
-  // 单独打开的 HTML 文件没有云存档，只用浏览器存储。
-  const cloud = { doc: null, ready: false, disabled: false, status: 'local', timer: 0, loadTimer: 0, writing: false, queued: false, retried: false, lastJson: '' };
-  const CLOUD_TEXT = {
-    cloud: '已保存到你的 Claude 账号，刷新、换设备都不会丢',
-    connecting: '正在连接云存档…',
-    offline: '云存档暂时连不上，先存在这个浏览器里',
-    readonly: '你只有查看权限，进度只存在这个浏览器里',
-    toobig: '自定义词库太大，云存档放不下，进度只存在这个浏览器里',
-    error: '云存档空间已满，进度只存在这个浏览器里',
-    local: '只保存在这个浏览器里，清除浏览器数据会丢失',
+  // 用不了云存档时，页面会说明原因，并提供“存档码”手动备份。
+  const cloud = { doc: null, ready: false, disabled: false, isOwner: false, status: 'connecting', detail: '', timer: 0, loadTimer: 0, writing: false, queued: false, retried: false, lastJson: '' };
+  const CLOUD_INFO = {
+    cloud: { ok: true, chip: '☁️ 进度已存到你的 Claude 账号', text: '进度已保存到你的 Claude 账号，刷新、换设备都不会丢。' },
+    connecting: { ok: true, chip: '☁️ 正在连接云存档…', text: '正在连接云存档…' },
+    offline: { chip: '⚠️ 云存档连不上，进度先存在本机', text: '云存档暂时连不上，进度先存在这个浏览器里，连上后会自动同步。如果一直连不上，可以用下面的存档码手动备份。' },
+    file: { chip: '⚠️ 进度只存在本机 · 点这里看原因', text: '你打开的是离线文件版，没有云存档，进度只存在这个浏览器里，有些手机每次打开文件都会清空它。想刷新不丢进度，请用 Claude 的网页链接打开；也可以用下面的存档码手动备份。' },
+    nodb: { chip: '⚠️ 这个窗口存不了进度 · 点这里看原因', text: '当前这个窗口（比如 App 里的预览窗口）不支持云存档，刷新后进度可能会丢。请在浏览器里打开这个网页并登录 Claude；如果刚更新过版本，先完全关掉再重新打开。也可以用下面的存档码手动备份。' },
+    noid: { chip: '⚠️ 没识别到登录账号 · 点这里看原因', text: '没有识别到你的 Claude 账号，进度没法存到云端。请登录 Claude 后重新打开这个网页；也可以用下面的存档码手动备份。' },
+    readonly: { chip: '⚠️ 只有查看权限，进度只存在本机', text: '你对这个网页只有查看权限，进度没法存到云端，只存在这个浏览器里。可以请网页的主人把你设为「可参与」。' },
+    error: { chip: '⚠️ 云存档保存失败 · 点这里看原因', text: '保存到云端时出错了，进度先存在这个浏览器里，下次答题会再试。也可以用下面的存档码手动备份。' },
   };
-  const cloudText = () => CLOUD_TEXT[cloud.status] || CLOUD_TEXT.local;
-  function setCloudStatus(s) {
+  const cloudInfo = () => CLOUD_INFO[cloud.status] || CLOUD_INFO.error;
+  const cloudCode = () => `状态代码：${cloud.status}${cloud.detail ? ' / ' + cloud.detail : ''}`;
+  function setCloudStatus(s, detail = '') {
     cloud.status = s;
-    const el = document.getElementById('cloud-status');
-    if (el) el.textContent = cloudText();
+    cloud.detail = detail;
+    const info = cloudInfo();
+    const chip = document.getElementById('save-chip');
+    if (chip) {
+      chip.textContent = info.chip;
+      chip.classList.toggle('warn', !info.ok);
+    }
+    const text = document.getElementById('cloud-status');
+    if (text) text.textContent = info.text;
+    const code = document.getElementById('cloud-code');
+    if (code) code.textContent = cloudCode();
+    const link = document.getElementById('open-link');
+    if (link) link.hidden = info.ok;
   }
 
   function normalizeState(s) {
@@ -166,26 +179,31 @@
     clearTimeout(cloud.timer);
     if (!cloud.doc || !cloud.ready || cloud.disabled) return;
     if (cloud.writing) { cloud.queued = true; return; }
-    const snapshot = JSON.parse(JSON.stringify(state));
-    const json = canon(snapshot);
-    if (json === cloud.lastJson) return;
-    if (json.length > 240000) { setCloudStatus('toobig'); return; }
+    const key = canon(state);
+    if (key === cloud.lastJson) return;
+    const json = JSON.stringify(state);
+    if (json.length > 240000) { setCloudStatus('error', '存档太大'); return; }
     cloud.writing = true;
     try {
-      await cloud.doc.set({ v: 1, savedAt: snapshot.savedAt || Date.now(), state: snapshot });
-      cloud.lastJson = json;
+      // 整份进度存成一个 JSON 字符串字段，避开文档字段名、嵌套数组等格式限制
+      await cloud.doc.set({ v: 2, savedAt: state.savedAt || Date.now(), json });
+      cloud.lastJson = key;
       cloud.retried = false;
       setCloudStatus('cloud');
     } catch (e) {
-      const code = e && e.code;
-      if (code === 'quota_exceeded') setCloudStatus('error');
-      else if (code === 'unavailable' || code === 'resource_exhausted') {
-        setCloudStatus('offline');
+      const code = (e && e.code) || 'unknown';
+      const detail = `写入 ${code}${e && e.message ? '：' + String(e.message).slice(0, 80) : ''}`;
+      if (code === 'unavailable' || code === 'resource_exhausted') {
+        setCloudStatus('offline', detail);
         if (!cloud.retried) { cloud.retried = true; setTimeout(cloudSaveSoon, 2000 + Math.random() * 3000); }
-      } else {
-        // 没有写入权限（只能查看）、权限被收回或者功能不可用：之后只用浏览器存储
+      } else if (code === 'invalid_argument' && !cloud.isOwner) {
         cloud.disabled = true;
-        setCloudStatus(code === 'invalid_argument' ? 'readonly' : 'local');
+        setCloudStatus('readonly', detail);
+      } else if (['not_granted', 'capability_disabled', 'capability_removed', 'revoked'].includes(code)) {
+        cloud.disabled = true;
+        setCloudStatus('nodb', detail);
+      } else {
+        setCloudStatus('error', detail);
       }
     } finally {
       cloud.writing = false;
@@ -193,9 +211,18 @@
     }
   }
 
+  function readBody(body) {
+    if (!body) return null;
+    try {
+      const s = typeof body.json === 'string' ? JSON.parse(body.json) : body.state;
+      return s && typeof s === 'object' ? normalizeState(s) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function applyRemote(snap) {
-    const body = snap.exists ? snap.data() : null;
-    const remote = body && body.state && typeof body.state === 'object' ? normalizeState(body.state) : null;
+    const remote = readBody(snap.exists ? snap.data() : null);
     if (snap.metadata && snap.metadata.fromCache && !cloud.ready) {
       // 上次访问留下的缓存副本：先合并显示，等云端确认后再写
       if (remote) adopt(mergeStates(state, remote), false);
@@ -204,7 +231,7 @@
     const first = !cloud.ready;
     cloud.ready = true;
     clearTimeout(cloud.loadTimer);
-    setCloudStatus('cloud');
+    if (first) setCloudStatus('cloud');
     if (!remote) {
       // 云端还没有存档：把这台设备上已有的进度传上去
       if (first && (state.savedAt || 0) > 0) {
@@ -218,33 +245,107 @@
     if (canon(state) !== cloud.lastJson) cloudSaveSoon();
   }
 
+  // 先直接读一次存档（拿到云端确认的数据就能开始保存），再订阅其他设备的更新
+  async function readOnce(retry) {
+    try {
+      applyRemote(await cloud.doc.get());
+    } catch (e) {
+      const code = (e && e.code) || 'unknown';
+      if (retry && (code === 'unavailable' || code === 'resource_exhausted')) setTimeout(() => readOnce(false), 1500 + Math.random() * 2000);
+      else if (!cloud.ready) setCloudStatus(['not_granted', 'capability_disabled', 'capability_removed', 'revoked'].includes(code) ? 'nodb' : 'offline', `读取 ${code}`);
+    }
+  }
+  function subscribe(retry) {
+    cloud.doc.onSnapshot(applyRemote, (err) => {
+      const code = (err && err.code) || 'unknown';
+      if (code === 'unavailable' && retry) { setTimeout(() => subscribe(false), 5000); return; }
+      if (!cloud.ready) setCloudStatus(code === 'revoked' ? 'nodb' : 'offline', `订阅 ${code}`);
+    });
+  }
+
   async function initCloud() {
     const c = window.claude;
-    if (!c || typeof c.use !== 'function') return;
+    if (!c || typeof c.use !== 'function') { setCloudStatus('file'); return; }
     setCloudStatus('connecting');
-    let db = null;
-    let user = null;
-    try {
-      [db, user] = await Promise.all([c.use('db'), c.use('user')]);
-    } catch (e) { /* ignore */ }
+    const safeUse = (name) => Promise.resolve().then(() => c.use(name)).catch(() => null);
+    const [db, user] = await Promise.all([safeUse('db'), safeUse('user')]);
+    if (!db) { setCloudStatus('nodb', 'db 不可用'); return; }
     const uid = user ? await user.id() : null;
-    if (!db || !uid) { setCloudStatus('local'); return; }
+    if (!uid) { setCloudStatus('noid', user ? '没有账号 id' : 'user 不可用'); return; }
+    cloud.isOwner = await user.isOwner();
     try {
       cloud.doc = db.doc(`data/users/${uid}/save`);
     } catch (e) {
-      setCloudStatus('local');
+      setCloudStatus('error', '存档路径无效');
       return;
     }
-    cloud.loadTimer = setTimeout(() => { if (!cloud.ready) setCloudStatus('offline'); }, 10000);
-    cloud.doc.onSnapshot(applyRemote, (err) => {
-      clearTimeout(cloud.loadTimer);
-      cloud.ready = false;
-      setCloudStatus(err && err.code === 'revoked' ? 'local' : 'offline');
-    });
+    cloud.loadTimer = setTimeout(() => { if (!cloud.ready) setCloudStatus('offline', '10 秒内没有响应'); }, 10000);
+    readOnce(true);
+    subscribe(true);
     // 切到后台或离开页面时，把还没写的进度立刻写上去
     const flushNow = () => cloudFlush();
     document.addEventListener('visibilitychange', () => { if (document.hidden) flushNow(); });
     window.addEventListener('pagehide', flushNow);
+  }
+
+  /* 存档码：在用不了云存档的环境里，手动备份和恢复进度 */
+  let lastSaveCode = '';
+  const toB64 = (bytes) => {
+    let s = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(s);
+  };
+  const fromB64 = (b64) => Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+  async function pipeBytes(bytes, stream) {
+    return new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer());
+  }
+  async function makeSaveCode() {
+    const raw = new TextEncoder().encode(JSON.stringify(state));
+    if (typeof CompressionStream === 'function') {
+      try { return 'WQ1:' + toB64(await pipeBytes(raw, new CompressionStream('deflate-raw'))); } catch (e) { /* 退回不压缩 */ }
+    }
+    return 'WQ0:' + toB64(raw);
+  }
+  async function readSaveCode(code) {
+    const m = String(code).replace(/\s+/g, '').match(/^WQ([01]):([A-Za-z0-9+/=]+)$/);
+    if (!m) throw new Error('format');
+    let bytes = fromB64(m[2]);
+    if (m[1] === '1') bytes = await pipeBytes(bytes, new DecompressionStream('deflate-raw'));
+    const data = JSON.parse(new TextDecoder().decode(bytes));
+    if (!data || typeof data !== 'object' || typeof data.xp !== 'number' || !data.progress || typeof data.progress !== 'object') throw new Error('content');
+    return data;
+  }
+  function copySaveCode() {
+    const ta = document.getElementById('export-code');
+    if (!lastSaveCode) { toast('存档码还在生成，请稍等一下'); return; }
+    const fallback = () => {
+      if (ta) { ta.focus(); ta.select(); }
+      toast('已选中存档码，请长按或按 Ctrl+C 复制', 2600);
+    };
+    try {
+      navigator.clipboard.writeText(lastSaveCode).then(() => toast('📋 存档码已复制，记得存好'), fallback);
+    } catch (e) {
+      fallback();
+    }
+  }
+  async function importSaveCode() {
+    const ta = document.getElementById('import-code');
+    const text = ta ? ta.value.trim() : '';
+    if (!text) { toast('先把存档码粘贴到下面的框里'); return; }
+    let data;
+    try {
+      data = await readSaveCode(text);
+    } catch (e) {
+      toast('这不是有效的存档码，请检查有没有复制完整', 2600);
+      return;
+    }
+    // 导入是用户明确要恢复：当作最新数据，并忽略之前的重置
+    data.savedAt = Date.now();
+    data.resetAt = 0;
+    adopt(mergeStates(state, data), false);
+    save();
+    toast(`📥 已导入存档（Lv.${levelInfo(state.xp).level}）`, 2600);
+    go('profile');
   }
 
 
@@ -687,6 +788,7 @@
           <div class="bar"><i style="width:${Math.min(100, (lv.cur / lv.need) * 100)}%"></i></div>
           <div class="hero-goal">🎯 今日目标 <b>${Math.min(todayCount, state.goal)}</b> / ${state.goal} 词次 ${todayCount >= state.goal ? '✅' : ''}</div>
           <div class="bar"><i style="width:${Math.min(100, (todayCount / state.goal) * 100)}%"></i></div>
+          <button class="save-chip ${cloudInfo().ok ? '' : 'warn'}" id="save-chip" data-action="nav" data-to="profile">${esc(cloudInfo().chip)}</button>
         </div>
       </section>
 
@@ -3015,6 +3117,23 @@ gentle | 温柔的`;
       </section>
 
       <section class="section">
+        <h2 class="section-title">☁️ 进度保存</h2>
+        <div class="card save-card">
+          <p class="save-status" id="cloud-status">${esc(cloudInfo().text)}</p>
+          ${window.WQ_SHARE_URL ? `<p class="small" id="open-link" ${cloudInfo().ok ? 'hidden' : ''}><a href="${esc(window.WQ_SHARE_URL)}" target="_blank" rel="noopener">🌐 在浏览器中打开这个网页</a></p>` : ''}
+          <p class="muted small" id="cloud-code">${esc(cloudCode())}</p>
+          <details class="save-code" ${cloudInfo().ok ? '' : 'open'}>
+            <summary>💾 存档码：手动备份和恢复进度</summary>
+            <p class="muted small">复制下面这串存档码，存到备忘录或发给自己。进度丢了的时候，把它粘贴到下面的框里导入就能恢复。</p>
+            <textarea id="export-code" class="code-box" readonly rows="3" aria-label="存档码">生成中…</textarea>
+            <div class="row"><button class="btn sm" data-action="copy-code">📋 复制存档码</button></div>
+            <textarea id="import-code" class="code-box" rows="3" placeholder="把存档码粘贴到这里" aria-label="粘贴存档码"></textarea>
+            <div class="row"><button class="btn sm ghost" data-action="import-code">📥 导入存档</button></div>
+          </details>
+        </div>
+      </section>
+
+      <section class="section">
         <h2 class="section-title">🏅 成就（${state.achievements.length}/${ACHIEVEMENTS.length}）</h2>
         <div class="achievements">
           ${ACHIEVEMENTS.map((a) => `<div class="ach ${state.achievements.includes(a.id) ? '' : 'locked'}">
@@ -3036,7 +3155,6 @@ gentle | 温柔的`;
             ${[['auto', '跟随系统'], ['light', '浅色'], ['dark', '深色']].map(([k, n]) => `<button class="btn sm ${state.theme === k ? '' : 'ghost'}" data-action="theme" data-v="${k}">${n}</button>`).join('')}
           </div>
           ${canSpeak ? '' : '<p class="muted small" style="margin:0">⚠️ 当前浏览器不支持语音朗读，建议使用 Chrome / Edge / Safari。</p>'}
-          <div class="row"><span>☁️ 进度保存</span><span class="spacer"></span><span class="muted small" id="cloud-status">${esc(cloudText())}</span></div>
           <div class="row"><span>🧹 清空所有学习进度</span><span class="spacer"></span>
             <button class="btn sm bad" data-action="reset">重置</button>
           </div>
@@ -3048,6 +3166,8 @@ gentle | 温柔的`;
       const el = e.target.closest('[data-action]');
       if (!el) return;
       const a = el.dataset.action;
+      if (a === 'copy-code') { copySaveCode(); return; }
+      if (a === 'import-code') { importSaveCode(); return; }
       if (a === 'goal') { state.goal = Number(el.dataset.n); state.today.goalDone = state.today.count >= state.goal; }
       else if (a === 'sound') state.sound = el.dataset.v === '1';
       else if (a === 'theme') { state.theme = el.dataset.v; applyTheme(); }
@@ -3065,6 +3185,11 @@ gentle | 温柔的`;
       go('profile');
     };
     onKey = (e) => { if (e.key === 'Escape') go('home'); };
+    makeSaveCode().then((code) => {
+      lastSaveCode = code;
+      const ta = document.getElementById('export-code');
+      if (ta) ta.value = code;
+    });
   }
 
   /* ======================= 启动 ======================= */

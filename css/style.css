@@ -596,6 +596,20 @@ button.slot:not(:disabled) { cursor: pointer; }
 .whack-note.ok { color: var(--good); }
 .whack-note.bad { color: var(--bad); }
 
+/* ---------- judge ---------- */
+.judge-card { padding: 28px 16px; border-width: 2px; text-align: center; transition: border-color .15s, background .15s; }
+.judge-card.ok { border-color: var(--good); background: var(--good-bg); }
+.judge-card.bad { border-color: var(--bad); background: var(--bad-bg); animation: shake .35s; }
+.judge-eq { margin-top: 14px; color: var(--muted); font-size: 14px; font-weight: 700; }
+.judge-cn { font-size: clamp(24px, 7vw, 32px); font-weight: 900; text-wrap: balance; }
+.judge-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
+.judge-btn { min-height: 72px; font-size: 22px; gap: 10px; }
+.judge-btn.no { background: var(--bad); color: var(--bad-ink); }
+.judge-btn.yes { background: var(--good); color: var(--good-ink); }
+.judge-key { font-size: 14px; opacity: .75; }
+@media (hover: none) { .judge-key { display: none; } }
+.judge-tip { min-height: 1.5em; margin: 12px 0 0; text-align: center; font-weight: 800; color: var(--bad); }
+
 @keyframes monsterHit {
   0%, 100% { transform: translateX(0); filter: none; }
   20% { transform: translateX(-8px) rotate(-8deg); filter: brightness(1.8); }

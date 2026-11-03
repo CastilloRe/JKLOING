@@ -29,7 +29,7 @@
     progress: {},
     custom: [],
     best: {},
-    stats: { answered: 0, correct: 0, bestCombo: 0, games: 0, perfect: 0, fastMatch: false, bestBlitz: 0, bestRainLevel: 0, bossWins: 0, bestWhack: 0 },
+    stats: { answered: 0, correct: 0, bestCombo: 0, games: 0, perfect: 0, fastMatch: false, bestBlitz: 0, bestRainLevel: 0, bossWins: 0, bestWhack: 0, bestJudge: 0 },
     achievements: [],
     seenModes: [],
     adventure: {},
@@ -346,6 +346,7 @@
     { id: 'blitz20', icon: '⏱️', name: '争分夺秒', desc: '60 秒挑战答对 20 题', test: () => state.stats.bestBlitz >= 20 },
     { id: 'rain3', icon: '🌧️', name: '雨中英雄', desc: '单词雨坚持到第 3 波', test: () => state.stats.bestRainLevel >= 3 },
     { id: 'whack20', icon: '🔨', name: '神锤手', desc: '打地鼠一局打中 20 只', test: () => (state.stats.bestWhack || 0) >= 20 },
+    { id: 'judge30', icon: '⚖️', name: '火眼金睛', desc: '对错快判连续答对 30 题', test: () => (state.stats.bestJudge || 0) >= 30 },
     { id: 'stage1', icon: '🗡️', name: '初战告捷', desc: '在单词闯关中通过一关', test: () => Object.values(state.adventure || {}).some((a) => Array.isArray(a) && a.some((x) => x > 0)) },
     { id: 'boss', icon: '🐉', name: '屠龙勇士', desc: '打败任意一个 BOSS', test: () => (state.stats.bossWins || 0) >= 1 },
     { id: 'm10', icon: '🌟', name: '小有所成', desc: '掌握 10 个单词', test: () => masteredTotal() >= 10 },
@@ -432,6 +433,7 @@
     { id: 'dictation', group: 'practice', icon: '🖊️', name: '听写', desc: '听发音，写出单词', color: '#f5c6a5', isNew: true },
     { id: 'cloze', group: 'practice', icon: '📝', name: '例句填空', desc: '读懂句子，选词填空', color: '#d6e88f' },
     { id: 'sentence', group: 'practice', icon: '🧱', name: '连词成句', desc: '按中文意思排好句子', color: '#c5b8f0', isNew: true },
+    { id: 'judge', group: 'game', icon: '⚖️', name: '对错快判', desc: '意思配不配？一错就结束', color: '#b5e48c', isNew: true },
     { id: 'scramble', group: 'game', icon: '🔤', name: '字母拼拼', desc: '点字母，拼出单词', color: '#a7e3e6' },
     { id: 'match', group: 'game', icon: '🧩', name: '连连看', desc: '英汉配对，挑战最快', color: '#ffb3c6' },
     { id: 'whack', group: 'game', icon: '🔨', name: '单词打地鼠', desc: '找到意思对的地鼠，敲它', color: '#e8cf9a', isNew: true },
@@ -451,6 +453,7 @@
     if (id === 'blitz') return `最佳 ${b} 题`;
     if (id === 'rain') return `最高 ${b} 分`;
     if (id === 'whack') return `最佳 ${b} 只`;
+    if (id === 'judge') return `最佳连对 ${b} 题`;
     return '';
   }
 
@@ -571,6 +574,7 @@
     else if (id === 'blitz') go('blitz');
     else if (id === 'rain') go('rain');
     else if (id === 'whack') go('whack');
+    else if (id === 'judge') go('judge');
     else if (id === 'adventure') go('adventure');
     else if (id === 'dictation') {
       if (!canSpeak) toast('当前浏览器不支持语音朗读，将以音标代替', 2600);
@@ -2458,6 +2462,155 @@
   }
 
 
+  /* ======================= 对错快判 ======================= */
+  function renderJudge() {
+    const book = currentBook();
+    const key = 'judge:' + book.id;
+    const prev = state.best[key];
+
+    introScreen({
+      icon: '⚖️',
+      title: '对错快判',
+      rules: [
+        '每题给出一个单词和一个中文意思，判断它们配不配',
+        '点「对」或「错」；电脑上也可以按 → 和 ← 键',
+        '答错或超时就结束，越往后时间越短，看你能连对几题',
+      ],
+      best: prev != null ? `${book.name} · 最佳连对 ${prev} 题` : '',
+      onStart: start,
+    });
+
+    function start() {
+      const later = makeLater();
+      const stream = wordStream(book);
+      const g = { streak: 0, xp: 0, q: null, left: 0, limit: 1, last: 0, lock: true, over: false, result: null };
+      let raf = 0;
+      onCleanup(() => cancelAnimationFrame(raf));
+
+      $app.innerHTML = `
+        <div class="game-head">
+          <button class="icon-btn" data-action="quit" aria-label="退出">✕</button>
+          <div class="bar"><i id="judge-bar" style="width:100%; background: var(--warn)"></i></div>
+          <span class="pill" title="连续答对">🔥 <b id="streak">0</b></span>
+        </div>
+        <section class="card judge-card" id="card"></section>
+        <div class="judge-buttons">
+          <button class="btn judge-btn no" data-action="judge" data-v="0">✗ 错<span class="judge-key">←</span></button>
+          <button class="btn judge-btn yes" data-action="judge" data-v="1">✓ 对<span class="judge-key">→</span></button>
+        </div>
+        <p class="judge-tip" id="tip" aria-live="polite"></p>`;
+      const bar = document.getElementById('judge-bar');
+
+      function nextQ() {
+        if (g.over) return;
+        const w = stream();
+        let shown = w;
+        if (Math.random() < 0.5) {
+          // 错的意思：挑同词性、意思不重叠的另一个词，避免“错”的其实也对
+          const others = shuffle(book.words.filter((x) => x !== w && x.cn !== w.cn && !meaningOverlap(x, w)));
+          shown = others.find((x) => x.pos === w.pos) || others[0] || w;
+        }
+        g.q = { w, shown, truth: shown === w };
+        g.limit = Math.max(2000, 5000 - g.streak * 100);
+        g.left = g.limit;
+        const card = document.getElementById('card');
+        card.className = 'card judge-card';
+        card.innerHTML = `
+          <div class="prompt-word">${esc(w.w)}</div>
+          <div>${w.ph ? `<span class="phonetic">${esc(w.ph)}</span>` : ''} ${speakBtn(w.w)}</div>
+          <div class="judge-eq">的意思是</div>
+          <div class="judge-cn">${esc(shown.cn)}</div>`;
+        bar.style.width = '100%';
+        bar.style.background = 'var(--warn)';
+        g.lock = false;
+        speak(w.w);
+      }
+
+      // v: true = 对，false = 错，null = 超时
+      function answer(v) {
+        if (g.lock || g.over) return;
+        g.lock = true;
+        const q = g.q;
+        const ok = v !== null && v === q.truth;
+        record(book, q.w, ok ? 'hard' : 'again');
+        if (ok) {
+          g.streak++;
+          const gain = 3 + (g.streak % 10 === 0 ? 10 : 0);
+          g.xp += gain;
+          addXP(gain);
+          sfx.good();
+          document.getElementById('streak').textContent = g.streak;
+          if (g.streak % 10 === 0) toast(`🔥 连对 ${g.streak} 题！`);
+          document.getElementById('card').classList.add('ok');
+          later(nextQ, 260);
+        } else {
+          lose(v === null);
+        }
+      }
+
+      function lose(timeout) {
+        g.over = true;
+        cancelAnimationFrame(raf);
+        const q = g.q;
+        sfx.bad();
+        document.getElementById('card').classList.add('bad');
+        const explain = q.truth
+          ? `「${q.w.w}」的意思就是「${shortMeaning(q.w)}」`
+          : `「${q.w.w}」的意思是「${shortMeaning(q.w)}」，不是「${shortMeaning(q.shown)}」`;
+        const message = (timeout ? '⏰ 时间到！' : '✗ ') + explain;
+        document.getElementById('tip').textContent = message;
+        const newBest = g.streak > 0 && (prev == null || g.streak > prev);
+        if (newBest) state.best[key] = g.streak;
+        state.stats.bestJudge = Math.max(state.stats.bestJudge || 0, g.streak);
+        save();
+        g.result = {
+          title: '对错快判',
+          correct: g.streak,
+          total: g.streak + 1,
+          score: g.xp,
+          wrong: [q.w],
+          stars: g.streak >= 30 ? 3 : g.streak >= 15 ? 2 : g.streak >= 5 ? 1 : 0,
+          message,
+          note: `连续答对 ${g.streak} 题${newBest ? ' · 🎉 新纪录！' : prev != null ? `（最佳 ${prev} 题）` : ''}`,
+          again: () => startMode('judge'),
+        };
+        later(() => go('result', g.result), 1600);
+      }
+
+      function tick(now) {
+        if (g.over) return;
+        if (!g.lock) {
+          g.left -= Math.min(now - g.last, 100);
+          const frac = Math.max(0, g.left / g.limit);
+          bar.style.width = frac * 100 + '%';
+          bar.style.background = frac < 0.3 ? 'var(--bad)' : 'var(--warn)';
+          if (g.left <= 0) {
+            answer(null);
+            return;
+          }
+        }
+        g.last = now;
+        raf = requestAnimationFrame(tick);
+      }
+
+      $app.onclick = (e) => {
+        if (quitHandler(e)) return;
+        const el = e.target.closest('[data-action="judge"]');
+        if (el) answer(el.dataset.v === '1');
+      };
+      onKey = (e) => {
+        if (e.key === 'Escape') return go('home');
+        const k = e.key.toLowerCase();
+        if (e.key === 'ArrowRight' || k === 'j') { e.preventDefault(); answer(true); }
+        else if (e.key === 'ArrowLeft' || k === 'f') { e.preventDefault(); answer(false); }
+      };
+
+      nextQ();
+      raf = requestAnimationFrame((now) => { g.last = now; tick(now); });
+    }
+  }
+
+
   /* ======================= 结算 ======================= */
   function renderResult(r) {
     const acc = r.total ? r.correct / r.total : 0;
@@ -2720,6 +2873,7 @@ gentle | 温柔的`;
     blitz: renderBlitz,
     rain: renderRain,
     whack: renderWhack,
+    judge: renderJudge,
     sentence: renderSentence,
     adventure: renderAdventure,
     stage: renderStage,

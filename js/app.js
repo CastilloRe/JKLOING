@@ -33,6 +33,8 @@
     achievements: [],
     seenModes: [],
     adventure: {},
+    savedAt: 0,
+    resetAt: 0,
   });
 
   function load() {
@@ -47,9 +49,204 @@
     return defaults();
   }
   function save() {
+    state.savedAt = Date.now();
     try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
+    cloudSaveSoon();
   }
   let state = load();
+
+  /* ======================= 云存档 ======================= */
+  // 在 Claude 网页里打开时，进度会额外存到当前登录账号的私有存档里
+  // （data/users/<id>/save，只有本人能读写）。有些环境（比如手机 App 内）
+  // 浏览器存储每次打开都是空的，靠云存档才能在刷新、换设备后找回进度。
+  // 单独打开的 HTML 文件没有云存档，只用浏览器存储。
+  const cloud = { doc: null, ready: false, disabled: false, status: 'local', timer: 0, loadTimer: 0, writing: false, queued: false, retried: false, lastJson: '' };
+  const CLOUD_TEXT = {
+    cloud: '已保存到你的 Claude 账号，刷新、换设备都不会丢',
+    connecting: '正在连接云存档…',
+    offline: '云存档暂时连不上，先存在这个浏览器里',
+    readonly: '你只有查看权限，进度只存在这个浏览器里',
+    toobig: '自定义词库太大，云存档放不下，进度只存在这个浏览器里',
+    error: '云存档空间已满，进度只存在这个浏览器里',
+    local: '只保存在这个浏览器里，清除浏览器数据会丢失',
+  };
+  const cloudText = () => CLOUD_TEXT[cloud.status] || CLOUD_TEXT.local;
+  function setCloudStatus(s) {
+    cloud.status = s;
+    const el = document.getElementById('cloud-status');
+    if (el) el.textContent = cloudText();
+  }
+
+  function normalizeState(s) {
+    const d = defaults();
+    return { ...d, ...s, stats: { ...d.stats, ...(s.stats || {}) }, today: { ...d.today, ...(s.today || {}) } };
+  }
+  // 键排好序的 JSON，用来比较两份进度是否相同
+  function stableStringify(v) {
+    if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
+    if (v && typeof v === 'object') return '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
+    return JSON.stringify(v);
+  }
+  const canon = (x) => stableStringify(JSON.parse(JSON.stringify(x)));
+
+  // 合并两份进度：数值取大、单词记录取最近一次、成就取并集。
+  // 一方重置过、另一方的数据又早于重置时间时，直接用重置后的那份。
+  function mergeStates(x, y) {
+    const a = normalizeState(x), b = normalizeState(y);
+    const ra = a.resetAt || 0, rb = b.resetAt || 0;
+    if (rb > ra && (a.savedAt || 0) <= rb) return b;
+    if (ra > rb && (b.savedAt || 0) <= ra) return a;
+    const newer = (a.savedAt || 0) >= (b.savedAt || 0) ? a : b;
+    const older = newer === a ? b : a;
+    const out = { ...older, ...newer };
+    out.xp = Math.max(a.xp || 0, b.xp || 0);
+    const la = a.lastStudyDay || '', lb = b.lastStudyDay || '';
+    if (la !== lb) {
+      const w = la > lb ? a : b;
+      out.lastStudyDay = w.lastStudyDay;
+      out.streak = w.streak;
+    } else {
+      out.streak = Math.max(a.streak || 0, b.streak || 0);
+    }
+    const ta = a.today, tb = b.today;
+    if (ta.date === tb.date) out.today = { date: ta.date, count: Math.max(ta.count || 0, tb.count || 0), goalDone: !!(ta.goalDone || tb.goalDone) };
+    else out.today = { ...((ta.date || '') > (tb.date || '') ? ta : tb) };
+    out.progress = {};
+    for (const src of [a.progress || {}, b.progress || {}]) {
+      for (const [k, p] of Object.entries(src)) {
+        const q = out.progress[k];
+        if (!q || (p.last || 0) > (q.last || 0)) out.progress[k] = p;
+      }
+    }
+    out.best = { ...(a.best || {}) };
+    for (const [k, v] of Object.entries(b.best || {})) {
+      const cur = out.best[k];
+      out.best[k] = cur == null ? v : k.startsWith('match:') ? Math.min(cur, v) : Math.max(cur, v);
+    }
+    out.stats = {};
+    for (const k of new Set([...Object.keys(a.stats), ...Object.keys(b.stats)])) {
+      const p = a.stats[k], q = b.stats[k];
+      out.stats[k] = typeof p === 'boolean' || typeof q === 'boolean' ? !!(p || q) : Math.max(p || 0, q || 0);
+    }
+    out.achievements = [...new Set([...(a.achievements || []), ...(b.achievements || [])])];
+    out.seenModes = [...new Set([...(a.seenModes || []), ...(b.seenModes || [])])];
+    out.adventure = {};
+    for (const id of new Set([...Object.keys(a.adventure || {}), ...Object.keys(b.adventure || {})])) {
+      const p = (a.adventure || {})[id] || [], q = (b.adventure || {})[id] || [];
+      out.adventure[id] = Array.from({ length: Math.max(p.length, q.length) }, (_, i) => Math.max(p[i] || 0, q[i] || 0));
+    }
+    out.savedAt = Math.max(a.savedAt || 0, b.savedAt || 0);
+    out.resetAt = Math.max(ra, rb);
+    return out;
+  }
+
+  // 把新进度换上来：写回浏览器存储，刷新顶栏和当前的列表页
+  function adopt(next, announce) {
+    if (canon(next) === canon(state)) return;
+    const xpBefore = state.xp;
+    state = next;
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
+    applyTheme();
+    renderTopbar();
+    if (['home', 'profile', 'adventure'].includes(current.name)) {
+      const y = window.scrollY;
+      SCREENS[current.name](current.arg);
+      window.scrollTo(0, y);
+    }
+    if (announce && state.xp > xpBefore) toast(`☁️ 已恢复你的学习进度（Lv.${levelInfo(state.xp).level}）`, 2800);
+  }
+
+  function cloudSaveSoon() {
+    if (!cloud.doc || !cloud.ready || cloud.disabled) return;
+    clearTimeout(cloud.timer);
+    cloud.timer = setTimeout(cloudFlush, 800);
+  }
+
+  async function cloudFlush() {
+    clearTimeout(cloud.timer);
+    if (!cloud.doc || !cloud.ready || cloud.disabled) return;
+    if (cloud.writing) { cloud.queued = true; return; }
+    const snapshot = JSON.parse(JSON.stringify(state));
+    const json = canon(snapshot);
+    if (json === cloud.lastJson) return;
+    if (json.length > 240000) { setCloudStatus('toobig'); return; }
+    cloud.writing = true;
+    try {
+      await cloud.doc.set({ v: 1, savedAt: snapshot.savedAt || Date.now(), state: snapshot });
+      cloud.lastJson = json;
+      cloud.retried = false;
+      setCloudStatus('cloud');
+    } catch (e) {
+      const code = e && e.code;
+      if (code === 'quota_exceeded') setCloudStatus('error');
+      else if (code === 'unavailable' || code === 'resource_exhausted') {
+        setCloudStatus('offline');
+        if (!cloud.retried) { cloud.retried = true; setTimeout(cloudSaveSoon, 2000 + Math.random() * 3000); }
+      } else {
+        // 没有写入权限（只能查看）、权限被收回或者功能不可用：之后只用浏览器存储
+        cloud.disabled = true;
+        setCloudStatus(code === 'invalid_argument' ? 'readonly' : 'local');
+      }
+    } finally {
+      cloud.writing = false;
+      if (cloud.queued) { cloud.queued = false; cloudSaveSoon(); }
+    }
+  }
+
+  function applyRemote(snap) {
+    const body = snap.exists ? snap.data() : null;
+    const remote = body && body.state && typeof body.state === 'object' ? normalizeState(body.state) : null;
+    if (snap.metadata && snap.metadata.fromCache && !cloud.ready) {
+      // 上次访问留下的缓存副本：先合并显示，等云端确认后再写
+      if (remote) adopt(mergeStates(state, remote), false);
+      return;
+    }
+    const first = !cloud.ready;
+    cloud.ready = true;
+    clearTimeout(cloud.loadTimer);
+    setCloudStatus('cloud');
+    if (!remote) {
+      // 云端还没有存档：把这台设备上已有的进度传上去
+      if (first && (state.savedAt || 0) > 0) {
+        cloudFlush();
+        if (state.xp > 0) toast('☁️ 已开启云存档，刷新也不会丢进度', 2800);
+      }
+      return;
+    }
+    cloud.lastJson = canon(remote);
+    adopt(mergeStates(state, remote), first);
+    if (canon(state) !== cloud.lastJson) cloudSaveSoon();
+  }
+
+  async function initCloud() {
+    const c = window.claude;
+    if (!c || typeof c.use !== 'function') return;
+    setCloudStatus('connecting');
+    let db = null;
+    let user = null;
+    try {
+      [db, user] = await Promise.all([c.use('db'), c.use('user')]);
+    } catch (e) { /* ignore */ }
+    const uid = user ? await user.id() : null;
+    if (!db || !uid) { setCloudStatus('local'); return; }
+    try {
+      cloud.doc = db.doc(`data/users/${uid}/save`);
+    } catch (e) {
+      setCloudStatus('local');
+      return;
+    }
+    cloud.loadTimer = setTimeout(() => { if (!cloud.ready) setCloudStatus('offline'); }, 10000);
+    cloud.doc.onSnapshot(applyRemote, (err) => {
+      clearTimeout(cloud.loadTimer);
+      cloud.ready = false;
+      setCloudStatus(err && err.code === 'revoked' ? 'local' : 'offline');
+    });
+    // 切到后台或离开页面时，把还没写的进度立刻写上去
+    const flushNow = () => cloudFlush();
+    document.addEventListener('visibilitychange', () => { if (document.hidden) flushNow(); });
+    window.addEventListener('pagehide', flushNow);
+  }
+
 
   /* ======================= 工具 ======================= */
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -367,6 +564,7 @@
   /* ======================= 路由 ======================= */
   let cleanups = [];
   let onKey = null;
+  let current = { name: 'home', arg: undefined };
   const onCleanup = (fn) => cleanups.push(fn);
   document.addEventListener('keydown', (e) => {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -381,6 +579,7 @@
     $app.oninput = null;
     if (canSpeak) { try { speechSynthesis.cancel(); } catch (e) { /* ignore */ } }
     window.scrollTo(0, 0);
+    current = { name, arg };
     SCREENS[name](arg);
     renderTopbar();
   }
@@ -2398,10 +2597,11 @@
       if (g.ended) return;
       g.ended = true;
       const stars = win ? Math.max(1, g.hearts) : 0;
-      const before = prog[idx] || 0;
+      const progNow = advProgress(book); // 云存档可能中途换了进度对象，这里重新取
+      const before = progNow[idx] || 0;
       let bonus = 0;
       if (win) {
-        prog[idx] = Math.max(before, stars);
+        progNow[idx] = Math.max(before, stars);
         bonus = st.boss ? 80 : 30;
         g.xp += bonus;
         addXP(bonus);
@@ -2836,6 +3036,7 @@ gentle | 温柔的`;
             ${[['auto', '跟随系统'], ['light', '浅色'], ['dark', '深色']].map(([k, n]) => `<button class="btn sm ${state.theme === k ? '' : 'ghost'}" data-action="theme" data-v="${k}">${n}</button>`).join('')}
           </div>
           ${canSpeak ? '' : '<p class="muted small" style="margin:0">⚠️ 当前浏览器不支持语音朗读，建议使用 Chrome / Edge / Safari。</p>'}
+          <div class="row"><span>☁️ 进度保存</span><span class="spacer"></span><span class="muted small" id="cloud-status">${esc(cloudText())}</span></div>
           <div class="row"><span>🧹 清空所有学习进度</span><span class="spacer"></span>
             <button class="btn sm bad" data-action="reset">重置</button>
           </div>
@@ -2853,8 +3054,12 @@ gentle | 温柔的`;
       else if (a === 'reset') {
         if (!armConfirm(el, '再点一次确认清空')) return;
         const keep = { custom: state.custom, theme: state.theme, sound: state.sound, goal: state.goal };
-        state = { ...defaults(), ...keep };
+        state = { ...defaults(), ...keep, resetAt: Date.now() };
         toast('进度已重置');
+        save();
+        cloudFlush();
+        go('profile');
+        return;
       }
       save();
       go('profile');
@@ -2886,4 +3091,5 @@ gentle | 温柔的`;
 
   applyTheme();
   go('home');
+  initCloud();
 })();
